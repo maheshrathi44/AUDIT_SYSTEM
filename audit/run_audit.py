@@ -17,11 +17,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from audit.extractors import get_sheet_names, read_excel_raw, read_procedure_file
+from audit.extractors import get_sheet_names, get_sample_rows, read_excel_raw, read_procedure_file
 from audit.llm import extract_rules_llm, map_columns, match_rules_for_row
 from audit.schemas.rule_schema import DraftRule
 
-PRIORITY_TAG = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}
+W = 80   # output width
+
+def _sep(char="="):  print(char * W)
+def _hdr(title):     print(f"\n{' ' + title + ' ':{'='}^{W}}")
+def _row_sep():      print("-" * W)
 
 
 def _collect_procedure_files(raw: list[str]) -> list[Path]:
@@ -41,10 +45,10 @@ def _collect_procedure_files(raw: list[str]) -> list[Path]:
 def _extract_all_rules(proc_paths: list[Path]) -> list[DraftRule]:
     all_rules: list[DraftRule] = []
     for path in proc_paths:
-        print(f"  Reading: {path.name}")
+        print(f"  Reading : {path.name}")
         doc = read_procedure_file(str(path))
         for w in doc.warnings:
-            print(f"    WARN: {w}")
+            print(f"  WARN    : {w}")
         rules = extract_rules_llm(
             doc.text,
             source_name=path.name,
@@ -53,34 +57,61 @@ def _extract_all_rules(proc_paths: list[Path]) -> list[DraftRule]:
         prefix = path.stem[:8].upper().replace(" ", "_")
         for r in rules:
             r.rule_id = f"{prefix}_{r.rule_id}"
-        print(f"    → {len(rules)} rules extracted")
+        print(f"  Rules   : {len(rules)} extracted")
         all_rules.extend(rules)
     return all_rules
 
 
 def _print_all_rules(rules: list[DraftRule]) -> None:
-    print(f"\n{'='*70}")
-    print(f"  EXTRACTED RULES ({len(rules)} total)")
-    print(f"{'='*70}")
+    _hdr(f" EXTRACTED RULES  ({len(rules)} total) ")
+    print(f"  {'RULE ID':<20} {'TYPE':<12} {'PRIORITY':<10} {'TIMELINE':<10}")
+    _sep("-")
     for r in rules:
-        tl = f"  [limit: {r.timeline_days}d]" if r.timeline_days else ""
-        print(f"  [{r.rule_id}]  {r.rule_type:<10}  {r.priority:<8}{tl}")
-        print(f"    {r.statement}")
-        print(f"    keywords: {', '.join(r.keywords)}")
-        print()
+        tl = f"{r.timeline_days}d" if r.timeline_days else "-"
+        print(f"  {r.rule_id:<20} {r.rule_type:<12} {r.priority:<10} {tl:<10}")
+        print(f"  Statement : {r.statement}")
+        print(f"  Keywords  : {', '.join(r.keywords)}")
+        _sep("-")
+
+
+def _print_row(idx: int, row_id: str, audit_cols: list, row: dict,
+               matched: list, col_map: dict) -> None:
+    _hdr(f" ROW {idx}  |  {row_id} ")
+
+    # Row field table
+    print(f"  {'COLUMN':<38} {'VALUE'}")
+    _sep("-")
+    for h in audit_cols[:12]:
+        val = row.get(h, "")
+        if val:
+            print(f"  {h:<38} {val}")
+    _sep("-")
+
+    print(f"\n  Relevant Rules Found : {len(matched)}\n")
+
+    if not matched:
+        print("  (no rules matched for this row)")
+        return
+
+    # Matched rules table
+    print(f"  {'RULE ID':<22} {'PRIORITY':<10} {'TIMELINE':<10} WHY")
+    _sep("-")
+    for m in matched:
+        tl = f"{m.rule.timeline_days}d" if m.rule.timeline_days else "-"
+        print(f"  {m.rule.rule_id:<22} {m.priority:<10} {tl:<10} {m.relevance}")
+        print(f"  {'':22} {'':10} {'':10} Rule: {m.rule.statement}")
+        _sep("-")
 
 
 def main() -> int:
     args = sys.argv[1:]
 
-    # parse --rows
     max_rows = 5
     if "--rows" in args:
         i = args.index("--rows")
         max_rows = int(args[i + 1])
         args = args[:i] + args[i + 2:]
 
-    # parse --excel
     if "--excel" not in args:
         print("Usage: python -m audit.run_audit --excel <dataset.xlsx> <proc.pdf> [--rows N]")
         return 1
@@ -92,70 +123,51 @@ def main() -> int:
         print("Provide at least one procedure PDF after the --excel argument.")
         return 1
 
-    # ── Step 1: Extract rules from procedures ─────────────────────────────
-    print("\n[1] Extracting rules from procedures via LLM ...")
+    # ── Step 1: Extract rules ─────────────────────────────────────────────
+    _hdr(" STEP 1 : PROCEDURE RULE EXTRACTION ")
     proc_paths = _collect_procedure_files(proc_raw)
     if not proc_paths:
         print("No procedure files found.")
         return 1
-
     all_rules = _extract_all_rules(proc_paths)
     if not all_rules:
         print("No rules extracted — check if procedure text was readable.")
         return 1
     _print_all_rules(all_rules)
 
-    # ── Step 2: Read dataset ───────────────────────────────────────────────
-    print(f"\n[2] Reading dataset: {excel_path}")
+    # ── Step 2: Read dataset ──────────────────────────────────────────────
+    _hdr(" STEP 2 : DATASET LOADING ")
     sheets = get_sheet_names(excel_path)
-    print(f"    Sheets: {sheets}")
+    print(f"  File    : {excel_path}")
+    print(f"  Sheets  : {sheets}")
     headers, rows = read_excel_raw(excel_path, max_rows=max_rows)
-    print(f"    Columns: {len(headers)}   Rows loaded: {len(rows)}")
-
+    print(f"  Columns : {len(headers)}    Rows loaded : {len(rows)}")
     if not rows:
-        print("No data rows found in dataset.")
+        print("No data rows found.")
         return 1
 
-    # ── Step 3: Map columns ────────────────────────────────────────────────
-    print("\n[3] Understanding dataset columns via LLM ...")
-    col_map = map_columns(headers, rows[0])
+    # ── Step 3: Map columns ───────────────────────────────────────────────
+    _hdr(" STEP 3 : COLUMN MAPPING (LLM) ")
+    col_map = map_columns(headers, get_sample_rows(rows))
     audit_cols = [h for h in headers if col_map.get(h, {}).get("audit_relevant")]
-    print(f"    Audit-relevant columns ({len(audit_cols)}):")
+    print(f"  {'COLUMN':<38} {'ROLE':<14} MEANING")
+    _sep("-")
     for h in audit_cols:
         info = col_map.get(h, {})
-        print(f"      {h:<40} {info.get('semantic_role',''):<12}  {info.get('meaning','')}")
+        print(f"  {h:<38} {info.get('semantic_role',''):<14} {info.get('meaning','')}")
+    _sep("-")
 
-    # ── Step 4: Match rules per row ────────────────────────────────────────
-    print(f"\n[4] Matching relevant rules to each row via LLM ...")
+    # ── Step 4: Per-row rule matching ─────────────────────────────────────
+    _hdr(" STEP 4 : RULE MATCHING PER ROW (LLM) ")
 
     for idx, row in enumerate(rows, start=1):
         row_id = next((v for v in list(row.values())[:3] if v), f"Row-{idx}")
-
-        print(f"\n{'─'*70}")
-        print(f"  Row {idx}: {row_id}")
-
-        # print audit-relevant fields for this row
-        for h in audit_cols[:10]:
-            val = row.get(h, "")
-            if val:
-                print(f"    {h}: {val}")
-
         matched = match_rules_for_row(row, all_rules, col_map)
-        print(f"\n  Relevant rules → {len(matched)}")
+        _print_row(idx, row_id, audit_cols, row, matched, col_map)
 
-        if not matched:
-            print("    (none matched)")
-            continue
-
-        for m in matched:
-            tag = PRIORITY_TAG.get(m.priority, "⚪")
-            tl  = f"  [limit: {m.rule.timeline_days}d]" if m.rule.timeline_days else ""
-            print(f"\n  {tag} [{m.rule.rule_id}]  {m.priority}{tl}")
-            print(f"     Rule : {m.rule.statement}")
-            print(f"     Why  : {m.relevance}")
-
-    print(f"\n{'='*70}")
-    print(f"Done — {len(rows)} rows processed  |  {len(all_rules)} rules  |  audit verdict: next step")
+    _sep("=")
+    print(f"  COMPLETE  |  {len(rows)} rows  |  {len(all_rules)} rules  |  next: audit verdict")
+    _sep("=")
     return 0
 
 

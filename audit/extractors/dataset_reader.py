@@ -66,6 +66,12 @@ def read_excel_raw(
     return headers, rows
 
 
+def get_sample_rows(rows: list[dict[str, str]], n: int = 5) -> list[dict[str, str]]:
+    """Return up to n rows with the most non-empty cells — no LLM involved."""
+    scored = sorted(rows, key=lambda r: sum(1 for v in r.values() if v), reverse=True)
+    return scored[:n]
+
+
 def read_all_sheets_raw(
     file_path: str,
     max_rows: int | None = None,

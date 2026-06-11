@@ -1,6 +1,6 @@
 """
 LLM column mapper — called once per dataset.
-Reads headers + one sample row → understands what each column means semantically.
+Reads headers + a few sample rows → understands what each column means semantically.
 Works for any dataset from any domain.
 """
 
@@ -11,7 +11,7 @@ import json
 from audit.llm.client import chat
 
 _SYSTEM = """\
-You are a data analyst. Given column headers from a dataset and one sample row of values,
+You are a data analyst. Given column headers from a dataset and a few sample rows of values,
 describe what each column represents.
 
 Return ONLY valid JSON:
@@ -43,18 +43,17 @@ audit_relevant = false for internal system codes, display-only fields, or blanks
 
 def map_columns(
     headers: list[str],
-    sample_row: dict[str, str],
+    sample_rows: list[dict[str, str]],
 ) -> dict[str, dict]:
     """
     Returns {column_name: {meaning, data_type, semantic_role, audit_relevant}}.
     One LLM call per dataset — result is reused for all rows.
     """
     header_list = "\n".join(f"  - {h}" for h in headers if h)
-    sample_str  = "\n".join(
-        f"  {k}: {v}"
-        for k, v in list(sample_row.items())[:30]
-        if v
-    )
+    samples_str = ""
+    for i, row in enumerate(sample_rows, 1):
+        row_str = "\n".join(f"    {k}: {v}" for k, v in list(row.items())[:30] if v)
+        samples_str += f"  Row {i}:\n{row_str}\n"
 
     response = chat(
         [
@@ -66,7 +65,7 @@ def map_columns(
                 "role": "user",
                 "content": (
                     f"Dataset columns:\n{header_list}\n\n"
-                    f"Sample row values:\n{sample_str}"
+                    f"Sample rows:\n{samples_str}"
                 ),
             },
         ],
