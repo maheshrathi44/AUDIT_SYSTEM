@@ -18,8 +18,12 @@ import sys
 from pathlib import Path
 
 from audit.extractors import get_sheet_names, get_sample_rows, read_excel_raw, read_procedure_file
-from audit.llm import extract_rules_llm, map_columns, match_rules_for_row
+from audit.llm import audit_row, extract_rules_llm, map_columns, match_rules_for_row
+from audit.llm.auditor import RowFinding
 from audit.schemas.rule_schema import DraftRule
+
+RISK_LABEL = {"High": "[ HIGH ]", "Medium": "[ MED  ]", "Low": "[ LOW  ]"}
+VERDICT_LABEL = {"Pass": "PASS", "Fail": "FAIL", "Missing Info": "MISSING"}
 
 W = 80   # output width
 
@@ -103,6 +107,22 @@ def _print_row(idx: int, row_id: str, audit_cols: list, row: dict,
         _sep("-")
 
 
+def _print_finding(finding: RowFinding) -> None:
+    risk_tag = RISK_LABEL.get(finding.risk, finding.risk)
+    print(f"\n  AUDIT RESULT : {finding.overall}   RISK : {risk_tag}")
+    print(f"  {finding.summary}")
+    if finding.verdicts:
+        print()
+        for v in finding.verdicts:
+            label = VERDICT_LABEL.get(v.verdict, v.verdict)
+            _sep("-")
+            print(f"  Rule ID  : {v.rule_id}  |  {label}")
+            print(f"  Actual   : {v.actual_value}")
+            print(f"  Expected : {v.expected_value}")
+            print(f"  Reason   : {v.reason}")
+        _sep("-")
+
+
 def main() -> int:
     args = sys.argv[1:]
 
@@ -157,16 +177,33 @@ def main() -> int:
         print(f"  {h:<38} {info.get('semantic_role',''):<14} {info.get('meaning','')}")
     _sep("-")
 
-    # ── Step 4: Per-row rule matching ─────────────────────────────────────
-    _hdr(" STEP 4 : RULE MATCHING PER ROW (LLM) ")
+    # ── Step 4+5: Per-row rule matching + audit verdict ───────────────────
+    _hdr(" STEP 4 : RULE MATCHING + AUDIT VERDICT (LLM) ")
+
+    summary_table: list[tuple] = []   # (row_id, overall, risk, failed, missing)
 
     for idx, row in enumerate(rows, start=1):
         row_id = next((v for v in list(row.values())[:3] if v), f"Row-{idx}")
+
+        # Step 4: match rules
         matched = match_rules_for_row(row, all_rules, col_map)
         _print_row(idx, row_id, audit_cols, row, matched, col_map)
 
+        # Step 5: audit verdict per rule + row summary
+        finding = audit_row(row, matched, col_map)
+        _print_finding(finding)
+        summary_table.append((row_id, finding.overall, finding.risk,
+                               finding.failed_rules, finding.missing_rules))
+
+    # ── Final summary table ────────────────────────────────────────────────
+    _hdr(" AUDIT SUMMARY ")
+    print(f"  {'ROW ID':<30} {'RESULT':<10} {'RISK':<10} FAILED RULES")
+    _sep("-")
+    for row_id, overall, risk, failed, missing in summary_table:
+        failed_str = ", ".join(failed) if failed else "-"
+        print(f"  {row_id:<30} {overall:<10} {risk:<10} {failed_str}")
     _sep("=")
-    print(f"  COMPLETE  |  {len(rows)} rows  |  {len(all_rules)} rules  |  next: audit verdict")
+    print(f"  COMPLETE  |  {len(rows)} rows  |  {len(all_rules)} rules")
     _sep("=")
     return 0
 

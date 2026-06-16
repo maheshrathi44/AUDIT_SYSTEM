@@ -14,37 +14,48 @@ from audit.schemas.rule_schema import DraftRule
 _CACHE_DIR = Path(__file__).resolve().parent.parent.parent / ".audit_cache"
 
 _SYSTEM = """\
-You are an audit rule extractor. Read the procedure document text and extract EVERY auditable rule, requirement, or obligation.
+You are an audit rule extractor. Your job is to read a procedure document and extract meaningful, auditable rules from it.
 
-Return ONLY valid JSON in this exact format:
+CORE PRINCIPLE — judge every sentence by its CONTENT, not by which section it appears in:
+
+  EXTRACT if the sentence (alone or combined with nearby sentences) says:
+    - someone MUST do something ("QA shall investigate...")
+    - something MUST happen within a time limit ("within 30 days...")
+    - a condition that triggers an action ("if part not available, then...")
+    - an approval or sign-off requirement ("approved by department head...")
+    - a check or verification step ("effectiveness to be confirmed...")
+
+  MERGE nearby sentences into ONE rule if they together describe a single step or obligation.
+    Example: "Part to be sent to QA. QA shall investigate jointly with vendor." → one rule.
+
+  SKIP only pure descriptions with zero obligation:
+    - A sentence that only defines what a word means with no action attached
+    - A sentence that only states the document's purpose with no obligation
+    - Judge this by content, NOT by the heading above it — any section can contain real rules
+
+Return ONLY valid JSON:
 {
   "rules": [
     {
       "rule_id": "R01",
-      "section": "methodology",
-      "statement": "exact or paraphrased rule from the document",
+      "section": "name of the section this came from (whatever the document calls it)",
+      "statement": "complete self-contained obligation in one clear sentence",
       "rule_type": "timeline",
       "priority": "high",
       "timeline_days": 30,
-      "keywords": ["attribution", "reply", "30", "days"]
+      "keywords": ["4", "to", "8", "key", "terms"]
     }
   ]
 }
 
 Field rules:
 - rule_id: sequential (R01, R02, ...)
-- section: which part of the document (objective/scope/methodology/timelines/criteria/action/monitoring/general)
-- statement: the full requirement in one clear sentence
+- section: use whatever section name the document itself uses — do not normalise or rename it
+- statement: the full obligation, self-contained and auditable as a standalone sentence
 - rule_type: timeline | mandatory | approval | advisory
-  timeline  = has a specific time limit (e.g. "within 30 days", "1 month")
-  mandatory = must always be done, no time limit
-  approval  = requires sign-off, escalation, or committee decision
-  advisory  = recommended practice, not strictly enforced
 - priority: critical | high | medium | low
-- timeline_days: integer days if rule has a time limit (1 month=30, 2 months=60), else null
-- keywords: 4-8 key terms useful for matching this rule to case data (lowercase)
-
-Extract EVERY distinct requirement. Do not skip anything. Do not merge separate requirements."""
+- timeline_days: integer days if a time limit exists (1 month=30, 2 months=60), else null
+- keywords: 4-8 lowercase terms that would help match this rule to a data row"""
 
 
 def _cache_path(procedure_id: str) -> Path:
