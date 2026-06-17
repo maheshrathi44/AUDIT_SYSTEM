@@ -108,11 +108,8 @@ def _print_row(idx: int, row_id: str, audit_cols: list, row: dict,
 
 
 def _print_finding(finding: RowFinding) -> None:
-    risk_tag = RISK_LABEL.get(finding.risk, finding.risk)
-    print(f"\n  AUDIT RESULT : {finding.overall}   RISK : {risk_tag}")
-    print(f"  {finding.summary}")
+    # Per-rule verdicts first
     if finding.verdicts:
-        print()
         for v in finding.verdicts:
             label = VERDICT_LABEL.get(v.verdict, v.verdict)
             _sep("-")
@@ -121,6 +118,11 @@ def _print_finding(finding: RowFinding) -> None:
             print(f"  Expected : {v.expected_value}")
             print(f"  Reason   : {v.reason}")
         _sep("-")
+
+    # Row summary at the bottom
+    risk_tag = RISK_LABEL.get(finding.risk, finding.risk)
+    print(f"\n  AUDIT RESULT : {finding.overall}   RISK : {risk_tag}")
+    print(f"  {finding.summary}")
 
 
 def main() -> int:
