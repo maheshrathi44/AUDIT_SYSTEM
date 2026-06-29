@@ -11,8 +11,8 @@ import json
 from audit.llm.client import chat
 
 _SYSTEM = """\
-You are a data analyst. Given column headers from a dataset and a few sample rows of values,
-describe what each column represents.
+You are a data analyst. Given column headers and sample rows from a dataset,
+describe what each column represents with PRECISE semantic roles.
 
 Return ONLY valid JSON:
 {
@@ -20,25 +20,36 @@ Return ONLY valid JSON:
     "Column Name": {
       "meaning": "brief description of what this column holds",
       "data_type": "date|text|number|status|id|boolean",
-      "semantic_role": "case_id|date_field|status|category|description|numeric|identifier|other",
+      "semantic_role": "one of the roles listed below",
       "audit_relevant": true
     }
   }
 }
 
-semantic_role guide:
-  case_id     — unique record identifier (e.g. ticket number, report ID)
-  date_field  — any date/timestamp (creation, submission, reply, closure)
-  status      — current state of the case/record
-  category    — classification, ranking, type, grade
-  description — free-text description of the issue or content
-  numeric     — count, duration, distance, amount, days
-  identifier  — reference to another record (e.g. FPCR number, part number)
-  other       — anything that doesn't fit above
+semantic_role — choose the MOST SPECIFIC role that applies:
 
-audit_relevant = true for anything that matters in a compliance/process audit
-  (dates, statuses, IDs, categories, descriptions, timelines).
-audit_relevant = false for internal system codes, display-only fields, or blanks."""
+DATE ROLES (be precise — do not use a generic date role):
+  date_reported   — when the case/defect/issue was first raised, reported, or opened
+  date_closed     — when the case was closed, resolved, finalized, or completed
+  date_received   — when a part, item, reply, or response was received
+  date_replied    — when a reply, response, or countermeasure was submitted
+  date_approved   — when approval, sign-off, or authorization was given
+  date_deadline   — target date, due date, or expected completion date
+  date_other      — any other date (system timestamp, creation date, modification date)
+
+NON-DATE ROLES:
+  case_id         — unique record identifier (ticket no., report no., record ID)
+  status          — current state of the record (Open, Closed, Pending, etc.)
+  category        — classification, ranking, type, grade, priority (A/B/C, Rank)
+  description     — free-text description, remarks, repair contents, findings
+  identifier      — reference to another record (reference no., part no., vendor code, form no.)
+  document_ref    — column storing an attached document name/path/reference
+  numeric         — count, duration, amount, days (a number, not a date)
+  other           — anything that does not fit the roles above
+
+audit_relevant:
+  true  — dates, statuses, identifiers, categories, descriptions relevant to compliance
+  false — system-internal codes, display-only fields, row numbers, blank columns"""
 
 
 def map_columns(
