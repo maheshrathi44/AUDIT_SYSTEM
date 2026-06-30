@@ -10,42 +10,49 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from dateutil.parser import parse as _dateutil_parse
+from dateutil.parser import ParserError
+
 from audit.llm.rule_check_generator import RuleCheck
 
-MAX_SAMPLES  = 20   # max sample rows collected per judgment rule
-MAX_EXAMPLES = 5    # max fail examples stored per formula rule
+MAX_SAMPLES      = 20  # max sample rows per judgment rule
+MAX_EXAMPLES     = 5   # max fail examples per formula rule
+MAX_PASS_EXAMPLES = 3  # max pass examples per formula rule
 
 
-# ── date / number helpers ──────────────────────────────────────────────────────
+# ── date parsing ───────────────────────────────────────────────────────────────
 
-_DATE_FORMATS = (
-    "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y",
-    "%d/%b/%Y", "%d-%b-%Y", "%d %b %Y", "%d %B %Y",
-)
+# ISO-style YYYY-MM-DD or YYYY/MM/DD — year is first, do NOT apply dayfirst
+_ISO_DATE_RE = re.compile(r'^\d{4}[-/]\d{1,2}[-/]\d{1,2}')
 
 def _parse_date(val: str) -> datetime | None:
-    for fmt in _DATE_FORMATS:
-        try:
-            return datetime.strptime(val.strip(), fmt)
-        except ValueError:
-            continue
-    return None
+    """Parse any date string. Handles any format via dateutil."""
+    v = val.strip()
+    if not v:
+        return None
+    try:
+        if _ISO_DATE_RE.match(v):
+            return _dateutil_parse(v, yearfirst=True, dayfirst=False)
+        return _dateutil_parse(v, dayfirst=True)
+    except (ParserError, OverflowError, ValueError):
+        return None
 
 
 # ── result containers ──────────────────────────────────────────────────────────
 
 @dataclass
 class FormulaResult:
-    rule_id: str
-    total:   int = 0
-    passed:  int = 0
-    failed:  int = 0
-    missing: int = 0
+    rule_id:       str
+    total:         int = 0
+    passed:        int = 0
+    failed:        int = 0
+    missing:       int = 0
     fail_examples: list[dict] = field(default_factory=list)
+    pass_examples: list[dict] = field(default_factory=list)
 
     @property
     def compliance_pct(self) -> float:
-        # missing = no data to check → not a violation, count as passing
+        # missing = no data / filter not triggered → counts as passing
         return round(100 * (self.passed + self.missing) / self.total, 1) if self.total else 0.0
 
 
@@ -66,7 +73,20 @@ class DetailedData:
 # ── per-row formula execution ──────────────────────────────────────────────────
 
 def _run_formula(row: dict, check: RuleCheck) -> str:
-    """Returns 'pass', 'fail', or 'missing'."""
+    """
+    Returns 'pass', 'fail', or 'missing'.
+
+    If filter_column + filter_value are set, the formula only runs on rows
+    where filter_column matches filter_value.
+    Non-matching rows return 'missing' → still count toward compliance.
+    """
+    # ── Conditional filter ────────────────────────────────────────────────────
+    if check.filter_column and check.filter_value:
+        actual   = row.get(check.filter_column, "").strip().lower()
+        expected = check.filter_value.strip().lower()
+        if actual != expected:
+            return "missing"
+
     val_a = row.get(check.column_a, "").strip()
     val_b = row.get(check.column_b, "").strip() if check.column_b else ""
     comp  = check.computation
@@ -98,19 +118,33 @@ def _run_formula(row: dict, check: RuleCheck) -> str:
     return "missing"
 
 
+def _example_row(row: dict, check: RuleCheck, context_columns: list[str]) -> dict:
+    """Build a compact example dict with context + formula columns."""
+    cols = list(dict.fromkeys(
+        context_columns
+        + ([check.filter_column] if check.filter_column else [])
+        + ([check.column_a]      if check.column_a      else [])
+        + ([check.column_b]      if check.column_b      else [])
+    ))
+    return {k: row.get(k, "") for k in cols if k}
+
+
 # ── main traversal ─────────────────────────────────────────────────────────────
 
 def traverse(
     rows: list[dict[str, str]],
     checks: list[RuleCheck],
+    context_columns: list[str] | None = None,
 ) -> DetailedData:
     """
     Single pass through all rows.
     Executes formula checks and collects samples for judgment checks.
     No LLM. Returns DetailedData.
+    context_columns: extra columns (e.g. case_id) included in fail/pass examples.
     """
-    formula_checks   = [c for c in checks if c.check_type == "formula"]
-    judgment_checks  = [c for c in checks if c.check_type == "judgment"]
+    ctx             = context_columns or []
+    formula_checks  = [c for c in checks if c.check_type == "formula"]
+    judgment_checks = [c for c in checks if c.check_type == "judgment"]
 
     f_results: dict[str, FormulaResult] = {
         c.rule_id: FormulaResult(rule_id=c.rule_id) for c in formula_checks
@@ -121,18 +155,18 @@ def traverse(
 
     for row in rows:
         for check in formula_checks:
-            fr = f_results[check.rule_id]
+            fr     = f_results[check.rule_id]
             fr.total += 1
             result = _run_formula(row, check)
+
             if result == "pass":
                 fr.passed += 1
+                if len(fr.pass_examples) < MAX_PASS_EXAMPLES:
+                    fr.pass_examples.append(_example_row(row, check, ctx))
             elif result == "fail":
                 fr.failed += 1
                 if len(fr.fail_examples) < MAX_EXAMPLES:
-                    fr.fail_examples.append({
-                        k: row.get(k, "")
-                        for k in [check.column_a, check.column_b] if k
-                    })
+                    fr.fail_examples.append(_example_row(row, check, ctx))
             else:
                 fr.missing += 1
 
@@ -140,9 +174,10 @@ def traverse(
             jr = j_results[check.rule_id]
             jr.total_rows += 1
             if len(jr.samples) < MAX_SAMPLES:
+                # collect only the columns specific to THIS judgment rule
                 sample = {
                     col: row.get(col, "")
-                    for col in check.sample_columns
+                    for col in (ctx + check.sample_columns)
                     if row.get(col, "").strip()
                 }
                 if sample:

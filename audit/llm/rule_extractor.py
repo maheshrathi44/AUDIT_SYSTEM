@@ -1,14 +1,20 @@
 """
 Extract audit rules from any procedure document using LLM.
-No caching — rules are re-extracted on every run from the uploaded procedure text.
+Cache: SHA256 of procedure text content → .audit_cache/rules_<hash>.json
+Same file uploaded again → instant cache hit, zero LLM call.
+Remove the cache dir to force re-extraction.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+from pathlib import Path
 
 from audit.llm.client import chat
 from audit.schemas.rule_schema import DraftRule
+
+_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / ".audit_cache"
 
 _SYSTEM = """\
 You are an audit rule extractor. Your job is to read a procedure document and extract meaningful, auditable rules from it.
@@ -54,15 +60,38 @@ Field rules:
 - keywords: 4-8 lowercase terms that would help match this rule to a data row"""
 
 
+def _content_hash(text: str) -> str:
+    return hashlib.sha256(text[:50_000].encode()).hexdigest()[:16]
+
+
 def extract_rules_llm(
     procedure_text: str,
     source_name: str = "procedure",
     procedure_id: str = "",
 ) -> list[DraftRule]:
-    """Extract auditable rules from procedure text via LLM. No caching."""
-    from pathlib import Path
-    stem = procedure_id or Path(source_name).stem
+    """
+    Extract auditable rules from procedure text.
+    Cache key = SHA256 of content — same file, any filename → instant hit.
+    Delete .audit_cache/ to force fresh extraction.
+    """
+    from pathlib import Path as _Path
+    stem = procedure_id or _Path(source_name).stem
 
+    # ── cache lookup ───────────────────────────────────────────────────────────
+    _CACHE_DIR.mkdir(exist_ok=True)
+    cache_file = _CACHE_DIR / f"rules_{_content_hash(procedure_text)}.json"
+
+    if cache_file.exists():
+        try:
+            data = json.loads(cache_file.read_text())
+            rules = _parse_rules(data.get("rules", []), source_name, stem)
+            if rules:
+                print(f"    (cache hit — {len(rules)} rules, skipping LLM for {source_name})")
+                return rules
+        except Exception:
+            pass
+
+    # ── LLM extraction ─────────────────────────────────────────────────────────
     response = chat(
         [
             {"role": "system", "content": _SYSTEM},
@@ -80,8 +109,17 @@ def extract_rules_llm(
         print(f"  WARN: LLM returned invalid JSON for {source_name}")
         return []
 
+    rules = _parse_rules(data.get("rules", []), source_name, stem)
+
+    # save to cache
+    cache_file.write_text(json.dumps({"source_name": source_name, "rules": data.get("rules", [])}, indent=2))
+    print(f"    ({len(rules)} rules extracted and cached for {source_name})")
+    return rules
+
+
+def _parse_rules(raw: list[dict], source_name: str, stem: str) -> list[DraftRule]:
     rules = []
-    for i, r in enumerate(data.get("rules", []), start=1):
+    for i, r in enumerate(raw, start=1):
         stmt = str(r.get("statement", "")).strip()
         if not stmt:
             continue
@@ -97,6 +135,4 @@ def extract_rules_llm(
             timeline_days=r.get("timeline_days"),
             keywords=[str(k).lower() for k in r.get("keywords", [])],
         ))
-
-    print(f"    ({len(rules)} rules extracted from {source_name})")
     return rules

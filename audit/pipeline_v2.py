@@ -2,10 +2,11 @@
 Pipeline v2 — full dataset audit with single traversal.
 
 Flow:
-  1. Extract rules from procedures        (LLM — one call per procedure)
+  1. Extract rules from procedures        (LLM — one call per procedure, cached by content hash)
   2. Map dataset columns                  (LLM, once)
   3. Filter rules to applicable ones      (LLM, once)
   4. Generate Rule Checks                 (LLM, batched ~4 calls)
+  4b. Validate columns — drop any check whose required columns don't exist in dataset
   5. Single dataset traversal             (zero LLM — pure Python)
   6. Generate verdicts                    (zero LLM for formula; 1 call per judgment rule)
   7. Write audit report                   (LLM, once)
@@ -91,13 +92,54 @@ def run_pipeline_v2(
         applicable_rules, col_map,
         supported_doc_names=supported_doc_names,
     )
+
+    # ── Step 4b: Column validation — drop checks with missing columns ──────
+    header_set = set(headers)
+    valid_checks: list[RuleCheck] = []
+    for check in rule_checks:
+        if check.check_type == "formula":
+            # column_a is mandatory
+            if not check.column_a or check.column_a not in header_set:
+                dropped[check.rule_id] = (
+                    f"required column '{check.column_a or 'unknown'}' not found in dataset"
+                )
+                continue
+            # column_b must exist if specified
+            if check.column_b and check.column_b not in header_set:
+                dropped[check.rule_id] = (
+                    f"required column '{check.column_b}' not found in dataset"
+                )
+                continue
+            # filter_column missing → remove the filter but keep the rule
+            if check.filter_column and check.filter_column not in header_set:
+                check.filter_column = ""
+                check.filter_value  = ""
+        elif check.check_type == "judgment":
+            valid_samples = [c for c in check.sample_columns if c in header_set]
+            if not valid_samples:
+                dropped[check.rule_id] = "no sample columns found in dataset"
+                continue
+            check.sample_columns = valid_samples
+
+        valid_checks.append(check)
+
+    rule_checks = valid_checks
+    valid_ids   = {c.rule_id for c in rule_checks}
+    applicable_rules = [r for r in applicable_rules if r.rule_id in valid_ids]
     f_count = sum(1 for c in rule_checks if c.check_type == "formula")
     j_count = sum(1 for c in rule_checks if c.check_type == "judgment")
-    log(f"  {f_count} formula checks, {j_count} judgment checks")
+    log(f"  {f_count} formula checks, {j_count} judgment checks ({len(dropped)} total dropped)")
+
+    # identify case_id column for richer fail/pass examples
+    case_col = next(
+        (h for h in headers if col_map.get(h, {}).get("semantic_role") == "case_id"),
+        None,
+    )
+    context_cols = [case_col] if case_col else []
 
     # ── Step 5: Single dataset traversal ──────────────────────────────────
     log(f"Step 5/7 — Traversing {len(rows):,} rows (zero LLM)...")
-    detailed_data = traverse(rows, rule_checks)
+    detailed_data = traverse(rows, rule_checks, context_columns=context_cols)
     log("  Traversal complete")
 
     # ── Step 6: Verdicts ───────────────────────────────────────────────────
@@ -123,3 +165,4 @@ def run_pipeline_v2(
         total_rows=len(rows),
         warnings=warnings,
     )
+`88`-``

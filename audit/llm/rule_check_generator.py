@@ -29,6 +29,13 @@ TIMELINE RULES ("within X days", "must happen within X days of Y"):
   → CRITICAL: both columns must be actual column names from the dataset.
     If you cannot confidently identify BOTH dates, use "judgment" instead.
 
+CONDITIONAL TIMELINE RULES ("if [condition] then check within X days"):
+  → Same as TIMELINE RULES but also set:
+  → filter_column: exact name of the column whose value triggers the check
+  → filter_value: the value that must be present for the rule to apply (e.g. "No", "Yes", "Open")
+  → Rows where filter_column != filter_value are skipped (treated as missing → still count as compliant)
+  Example: "close if no part received within 30 days" → filter_column: "Parts Availability", filter_value: "No"
+
 MANDATORY FIELD RULES ("must be filled", "shall be raised", "is required", "must be present"):
   → check_type: "formula", computation: "not_blank"
   → column_a: the field that must not be empty   (role: identifier, status, date_*, etc.)
@@ -65,8 +72,24 @@ Return ONLY valid JSON — column names in the output must be real column names 
       "rule_id": "R01",
       "check_type": "formula",
       "description": "record must be completed within 30 days of being opened",
+      "filter_column": "",
+      "filter_value": "",
       "column_a": "<exact name of the start/opened date column>",
       "column_b": "<exact name of the end/completed date column>",
+      "computation": "date_difference",
+      "threshold": 30,
+      "pass_condition": "<=",
+      "sample_columns": [],
+      "judgment_question": ""
+    },
+    {
+      "rule_id": "R02",
+      "check_type": "formula",
+      "description": "close within 30 days only when part is not available",
+      "filter_column": "<exact name of the availability/status column>",
+      "filter_value": "No",
+      "column_a": "<exact name of the report/open date column>",
+      "column_b": "<exact name of the closed/reply date column>",
       "computation": "date_difference",
       "threshold": 30,
       "pass_condition": "<=",
@@ -107,6 +130,10 @@ class RuleCheck:
     rule:        DraftRule
     check_type:  str          # "formula" or "judgment"
     description: str = ""
+
+    # conditional filter (optional) — formula only runs on rows where filter_column == filter_value
+    filter_column: str = ""
+    filter_value:  str = ""
 
     # formula fields
     column_a:      str        = ""
@@ -183,6 +210,8 @@ def _dict_to_check(c: dict, rule: DraftRule) -> RuleCheck:
         rule=rule,
         check_type=c.get("check_type", "judgment"),
         description=c.get("description", ""),
+        filter_column=c.get("filter_column") or "",
+        filter_value=c.get("filter_value") or "",
         column_a=c.get("column_a") or "",
         column_b=c.get("column_b") or "",
         computation=c.get("computation") or "",

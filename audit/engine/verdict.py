@@ -44,6 +44,7 @@ class RuleVerdict:
     missing_count:   int
     finding:         str
     fail_examples:   list[dict] = field(default_factory=list)
+    pass_examples:   list[dict] = field(default_factory=list)
 
 
 def _formula_verdict(fr: FormulaResult, check: RuleCheck) -> RuleVerdict:
@@ -72,6 +73,7 @@ def _formula_verdict(fr: FormulaResult, check: RuleCheck) -> RuleVerdict:
         missing_count=fr.missing,
         finding=finding,
         fail_examples=fr.fail_examples,
+        pass_examples=fr.pass_examples,
     )
 
 

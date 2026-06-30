@@ -1,10 +1,70 @@
 """AI Audit System — Streamlit frontend (full-dataset v2 pipeline)"""
 
+import base64
 import os
 import tempfile
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+
+_ASSETS = Path(__file__).parent / "assets"
+
+
+def _real_logo_html(height: int = 82) -> str:
+    """Return <img> tag with the real MSIL logo, or empty string if not found."""
+    for fname in ("ms_logo.webp", "maruti_logo.png"):
+        p = _ASSETS / fname
+        if p.exists():
+            mime = "image/webp" if fname.endswith(".webp") else "image/png"
+            b64 = base64.b64encode(p.read_bytes()).decode()
+            return (
+                f'<img src="data:{mime};base64,{b64}" '
+                f'style="height:{height}px;display:inline-block;vertical-align:middle;'
+                f'object-fit:contain;margin-right:8px"/>'
+            )
+    return ""
+
+# Maruti Suzuki hero emblem — Maruti bird + Suzuki S (no text, proper emblems)
+_MSIL_LOGO_SVG = (
+    '<svg viewBox="0 0 174 90" xmlns="http://www.w3.org/2000/svg" '
+    'style="height:82px;display:block;width:auto">'
+
+    # ── Maruti bird mark (blue) ──────────────────────────────────────────
+    # Left inner feather
+    '<path d="M43,86 C41,66 33,44 34,8 C38,22 41,50 43,68 Z" fill="#1B3A8A"/>'
+    # Left outer feather
+    '<path d="M43,86 C33,60 6,34 12,4 L34,8 C33,44 41,66 43,86 Z" fill="#1B3A8A"/>'
+    # Right inner feather (mirror)
+    '<path d="M47,86 C49,66 57,44 56,8 C52,22 49,50 47,68 Z" fill="#1B3A8A"/>'
+    # Right outer feather (mirror)
+    '<path d="M47,86 C57,60 84,34 78,4 L56,8 C57,44 49,66 47,86 Z" fill="#1B3A8A"/>'
+
+    # ── Suzuki S mark (red) ──────────────────────────────────────────────
+    '<g fill="#C8102E" transform="translate(96,4)">'
+    # top parallelogram
+    '<polygon points="2,0 54,0 46,38 -6,38"/>'
+    # bottom parallelogram (offset right to form S)
+    '<polygon points="16,44 68,44 60,82 8,82"/>'
+    '</g>'
+
+    '</svg>'
+)
+
+# Compact MSIL emblem — bird + S mark (used in nav header, small version)
+_MSIL_EMBLEM_SVG = (
+    '<svg viewBox="0 0 174 90" xmlns="http://www.w3.org/2000/svg" '
+    'style="height:22px;display:inline-block;vertical-align:middle;margin-right:8px;width:auto">'
+    '<path d="M43,86 C41,66 33,44 34,8 C38,22 41,50 43,68 Z" fill="#1B3A8A"/>'
+    '<path d="M43,86 C33,60 6,34 12,4 L34,8 C33,44 41,66 43,86 Z" fill="#1B3A8A"/>'
+    '<path d="M47,86 C49,66 57,44 56,8 C52,22 49,50 47,68 Z" fill="#1B3A8A"/>'
+    '<path d="M47,86 C57,60 84,34 78,4 L56,8 C57,44 49,66 47,86 Z" fill="#1B3A8A"/>'
+    '<g fill="#C8102E" transform="translate(96,4)">'
+    '<polygon points="2,0 54,0 46,38 -6,38"/>'
+    '<polygon points="16,44 68,44 60,82 8,82"/>'
+    '</g>'
+    '</svg>'
+)
 
 st.set_page_config(
     page_title="AI Audit System",
@@ -192,6 +252,24 @@ div[data-testid="stDataFrame"] {{
 }}
 /* info/warning/error boxes */
 [data-testid="stAlert"] {{ border-radius: 8px; }}
+
+/* ── MSIL Upload Cards ── */
+.upload-card-hdr {{
+    background: {t['surface']}; border: 1px solid {t['border']};
+    border-top: 3px solid {t['accent']};
+    border-radius: 10px 10px 0 0; padding: 14px 18px 12px;
+}}
+.upload-card-icon {{ font-size: 22px; margin-bottom: 6px; }}
+.upload-card-title {{ font-size: 13px; font-weight: 700; color: {t['text']}; }}
+.upload-card-sub {{ font-size: 11px; color: {t['muted']}; margin-top: 2px; line-height: 1.4; }}
+
+/* ── Check-type mini badge on verdict cards ── */
+.check-type-lbl {{
+    font-size: 9.5px; font-weight: 700; letter-spacing: .5px;
+    text-transform: uppercase; padding: 2px 7px; border-radius: 20px;
+    border: 1px solid {t['border']}; color: {t['muted']};
+    background: {t['bg']};
+}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -201,15 +279,16 @@ def _header(title: str, subtitle: str = "") -> None:
     c1, c2 = st.columns([7, 1])
     with c1:
         sub = f'<div class="app-sub">{subtitle}</div>' if subtitle else ""
+        logo_html = _real_logo_html(28) or _MSIL_EMBLEM_SVG
         st.markdown(
             f'<div class="app-header"><div>'
-            f'<div class="app-title">{title}</div>{sub}'
+            f'<div class="app-title">{logo_html}{title}</div>{sub}'
             f'</div></div>',
             unsafe_allow_html=True,
         )
     with c2:
-        lbl = "Light Mode" if st.session_state.dark else "Dark Mode"
-        if st.button(lbl, key="theme_btn"):
+        icon = "☀️" if st.session_state.dark else "🌙"
+        if st.button(icon, key="theme_btn"):
             st.session_state.dark = not st.session_state.dark
             st.rerun()
 
@@ -262,12 +341,81 @@ def _prio_badge(priority: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 def page_upload() -> None:
     _inject_css()
-    _header("AI Audit System", "Full-dataset compliance auditing — all rows, minimal LLM calls")
+    t = _c()
+    _header("AI Audit System")
 
-    c_proc, c_data, c_supp = st.columns(3, gap="large")
+    # ── MSIL Professional Hero ──────────────────────────────────────────────────
+    dark = st.session_state.dark
+    hero_bg   = "#140808" if dark else "#fff8f8"
+    hero_bg2  = "#0f0505" if dark else "#ffe8e8"
+    txt_brand = "#ff6b6b" if dark else "#C8102E"
+
+    st.markdown(
+        f'<div style="background:linear-gradient(135deg,{hero_bg} 0%,{hero_bg2} 100%);'
+        f'border:1px solid {t["border"]};border-left:5px solid #C8102E;'
+        f'border-radius:14px;padding:28px 36px;margin-bottom:32px;'
+        f'display:flex;align-items:center;gap:32px">'
+
+        # ── Logo ────────────────────────────────────────────────────────────
+        f'<div style="flex-shrink:0;padding-right:4px">'
+        + (_real_logo_html(82) or _MSIL_LOGO_SVG)
+        + f'</div>'
+
+        # ── Brand text ───────────────────────────────────────────────────────
+        f'<div style="flex:1">'
+        f'<div style="font-size:10px;font-weight:800;color:{txt_brand};'
+        f'letter-spacing:2.5px;text-transform:uppercase;margin-bottom:5px">'
+        f'Maruti Suzuki India Limited</div>'
+        f'<div style="font-size:26px;font-weight:800;color:{t["text"]};'
+        f'line-height:1.15;letter-spacing:-.5px;margin-bottom:7px">'
+        f'AI Compliance<br>Audit System</div>'
+        f'<div style="font-size:12.5px;color:{t["muted"]};line-height:1.6">'
+        f'Quality Assurance &amp; Quality Department'
+        f'&nbsp;&nbsp;·&nbsp;&nbsp;Automated full-dataset compliance verification'
+        f'</div>'
+        f'</div>'
+
+        # ── Feature list ─────────────────────────────────────────────────────
+        f'<div style="flex-shrink:0;display:flex;flex-direction:column;gap:10px;'
+        f'border-left:1px solid {t["border"]};padding-left:32px;min-width:210px">'
+        + "".join(
+            f'<div style="display:flex;align-items:center;gap:8px">'
+            f'<span style="width:6px;height:6px;border-radius:50%;background:#C8102E;'
+            f'flex-shrink:0;display:inline-block"></span>'
+            f'<span style="font-size:12px;color:{t["muted"]}">{step}</span>'
+            f'</div>'
+            for step in [
+                "Extract rules from procedures",
+                "Intelligent column mapping",
+                "Automated compliance verdicts",
+                "Executive audit report",
+            ]
+        )
+        + f'</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Upload section ──────────────────────────────────────────────────────────
+    st.markdown(
+        f'<div class="slbl" style="margin-bottom:14px">Upload Files to Begin</div>',
+        unsafe_allow_html=True,
+    )
+
+    c_proc, c_data, c_supp = st.columns(3, gap="medium")
 
     with c_proc:
-        st.markdown('<div class="slbl">Procedure Documents</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="upload-card-hdr" style="border-top-color:#C8102E">'
+            f'<div class="upload-card-icon">📋</div>'
+            f'<div class="upload-card-title">Procedure Documents</div>'
+            f'<div class="upload-card-sub">Standard operating procedures, work instructions, '
+            f'quality manuals — any document containing auditable rules.</div>'
+            f'<div style="margin-top:8px;font-size:10.5px;color:{t["muted"]}">'
+            f'PDF · DOCX · TXT · MD</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
         proc_files = st.file_uploader(
             "procedures",
             type=["pdf", "docx", "txt", "md"],
@@ -276,7 +424,17 @@ def page_upload() -> None:
         )
 
     with c_data:
-        st.markdown('<div class="slbl">Dataset</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="upload-card-hdr" style="border-top-color:{t["accent"]}">'
+            f'<div class="upload-card-icon">📊</div>'
+            f'<div class="upload-card-title">Audit Dataset</div>'
+            f'<div class="upload-card-sub">The spreadsheet containing records to be verified. '
+            f'All rows are traversed — no sampling.</div>'
+            f'<div style="margin-top:8px;font-size:10.5px;color:{t["muted"]}">'
+            f'XLSX only</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
         dataset_file = st.file_uploader(
             "dataset",
             type=["xlsx"],
@@ -284,8 +442,18 @@ def page_upload() -> None:
         )
 
     with c_supp:
-        t = _c()
-        st.markdown('<div class="slbl">Supported Documents</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="upload-card-hdr" style="border-top-color:{t["muted"]}">'
+            f'<div class="upload-card-icon">📎</div>'
+            f'<div class="upload-card-title">Reference Documents <span style="font-size:10px;'
+            f'font-weight:400;color:{t["muted"]}">Optional</span></div>'
+            f'<div class="upload-card-sub">Forms, checklists, or certificates that your '
+            f'procedure expects to be present. Filename must match the dataset column exactly.</div>'
+            f'<div style="margin-top:8px;font-size:10.5px;color:{t["muted"]}">'
+            f'PDF · DOCX</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
         supp_files = st.file_uploader(
             "supported_docs",
             type=["pdf", "docx"],
@@ -302,24 +470,21 @@ def page_upload() -> None:
             )
             st.markdown(
                 f'<div style="font-size:12px;color:{t["text"]};margin-top:8px;line-height:1.8">'
-                f'<b>Detected:</b><br>{name_pills}'
-                f'<div style="color:{t["muted"]};margin-top:6px;font-size:11px">'
-                f'These exact filenames must appear in the relevant dataset column.</div>'
+                f'{name_pills}'
                 f'</div>',
                 unsafe_allow_html=True,
-            )
-        else:
-            st.caption(
-                "Optional — upload documents that rules may reference. "
-                "The filename must match exactly what the dataset column stores."
             )
 
     st.markdown("<br>", unsafe_allow_html=True)
     ready = bool(proc_files and dataset_file)
     if not ready:
-        st.caption("Upload at least one procedure document and a dataset to continue.")
+        st.markdown(
+            f'<div style="font-size:12px;color:{t["muted"]};text-align:center;'
+            f'padding:6px 0 2px">Upload at least one procedure document and a dataset to continue.</div>',
+            unsafe_allow_html=True,
+        )
 
-    if st.button("Run Audit", type="primary", disabled=not ready):
+    if st.button("Run Audit  →", type="primary", disabled=not ready):
         doc_names = [f.name for f in supp_files] if supp_files else []
         _run_pipeline(proc_files, dataset_file, doc_names)
 
@@ -508,7 +673,10 @@ def page_results() -> None:
                 f'<div id="vcard-{v.rule_id}" class="vcard {v_cls}">'
                 # header row
                 f'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">'
+                f'<div style="display:flex;align-items:center;gap:8px">'
                 f'<span style="font-size:13px;font-weight:700;color:{t["accent"]};font-family:monospace">{v.rule_id}</span>'
+                f'<span class="check-type-lbl">{v.check_type}</span>'
+                f'</div>'
                 f'<div style="display:flex;gap:6px">{_badge(v.verdict)}&nbsp;{_risk_badge(v.risk)}</div>'
                 f'</div>'
                 # rule statement
@@ -535,9 +703,16 @@ def page_results() -> None:
             )
 
             if v.fail_examples:
-                with st.expander(f"Sample failures — {v.rule_id}"):
+                with st.expander(f"⚠ Sample failures ({len(v.fail_examples)}) — {v.rule_id}"):
                     st.dataframe(
                         pd.DataFrame(v.fail_examples),
+                        use_container_width=True, hide_index=True,
+                    )
+
+            if hasattr(v, "pass_examples") and v.pass_examples:
+                with st.expander(f"✓ Sample passes ({len(v.pass_examples)}) — {v.rule_id}"):
+                    st.dataframe(
+                        pd.DataFrame(v.pass_examples),
                         use_container_width=True, hide_index=True,
                     )
 
@@ -578,6 +753,15 @@ def page_results() -> None:
                 elif ch.computation in ("not_blank", "is_blank"):
                     formula_display = ch.computation
 
+                filter_display = ""
+                if ch.filter_column and ch.filter_value:
+                    filter_display = (
+                        f'<div style="font-size:11.5px;color:{t["muted"]};margin-top:3px">'
+                        f'Only when <b style="color:{t["text"]}">{ch.filter_column}</b>'
+                        f' = <b style="color:{t["accent"]}">{ch.filter_value}</b>'
+                        f' &nbsp;·&nbsp; other rows counted as missing (pass)</div>'
+                    )
+
                 # warn if all missing (likely bad column mapping)
                 all_missing = fr and fr.total > 0 and fr.passed == 0 and fr.failed == 0
                 card_cls = "dcard dcard-warn" if all_missing else "dcard"
@@ -602,6 +786,7 @@ def page_results() -> None:
                     f'<span style="color:{t["muted"]}">Columns:</span> {col_display} &nbsp;|&nbsp; '
                     f'<span style="color:{t["muted"]}">Formula:</span> {formula_display}'
                     f'</div>'
+                    f'{filter_display}'
                     f'<div class="dcard-meta" style="margin-top:6px">{ch.description}</div>'
                     f'<div style="display:flex;gap:20px;margin-top:10px">'
                     f'<span><b style="color:#22c55e">{pass_c:,}</b> <span style="color:{t["muted"]};font-size:11px">pass</span></span>'
@@ -660,21 +845,32 @@ def page_results() -> None:
     # TAB 3 — All Rules
     # ══════════════════════════════════════════════════════════════════════════
     with tab_r:
+        applicable_ids = {r.rule_id for r in results.applicable_rules}
+        dropped_ids    = set(results.dropped_rules.keys())
         st.markdown(
             f'<div class="slbl">'
-            f'{len(results.applicable_rules)} applicable out of {len(results.all_rules)} extracted</div>',
+            f'{len(results.all_rules)} total · '
+            f'{len(results.applicable_rules)} applicable · '
+            f'{len(dropped_ids)} dropped</div>',
             unsafe_allow_html=True,
         )
-        for r in results.applicable_rules:
+        for r in results.all_rules:
             tl = f"  ·  {r.timeline_days}d" if r.timeline_days else ""
+            if r.rule_id in applicable_ids:
+                status_badge = f'<span class="badge b-pass" style="font-size:9px">applicable</span>'
+            else:
+                status_badge = f'<span class="badge b-fail" style="font-size:9px">dropped</span>'
             with st.expander(f"{r.rule_id}  ·  {r.rule_type.title()}{tl}"):
                 st.markdown(
+                    f'{status_badge}&nbsp;&nbsp;'
                     f'{_prio_badge(r.priority)}&nbsp;&nbsp;'
                     f'<span style="font-size:11px;color:{t["muted"]}">{r.rule_type.title()}</span>',
                     unsafe_allow_html=True,
                 )
                 st.markdown(f"**{r.statement}**")
-                if r.keywords:
+                if r.rule_id in dropped_ids:
+                    st.caption(f"Dropped: {results.dropped_rules[r.rule_id]}")
+                elif r.keywords:
                     st.caption("Keywords: " + "  ·  ".join(r.keywords))
 
     # ══════════════════════════════════════════════════════════════════════════
