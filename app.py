@@ -704,17 +704,19 @@ def page_results() -> None:
 
             if v.fail_examples:
                 with st.expander(f"⚠ Sample failures ({len(v.fail_examples)}) — {v.rule_id}"):
-                    st.dataframe(
-                        pd.DataFrame(v.fail_examples),
-                        use_container_width=True, hide_index=True,
-                    )
+                    st.dataframe(pd.DataFrame(v.fail_examples), use_container_width=True, hide_index=True)
 
-            if hasattr(v, "pass_examples") and v.pass_examples:
+            if v.pass_examples:
                 with st.expander(f"✓ Sample passes ({len(v.pass_examples)}) — {v.rule_id}"):
-                    st.dataframe(
-                        pd.DataFrame(v.pass_examples),
-                        use_container_width=True, hide_index=True,
-                    )
+                    st.dataframe(pd.DataFrame(v.pass_examples), use_container_width=True, hide_index=True)
+
+            if v.miss_examples:
+                with st.expander(f"– Sample missing ({len(v.miss_examples)}) — {v.rule_id}"):
+                    st.dataframe(pd.DataFrame(v.miss_examples), use_container_width=True, hide_index=True)
+
+            if v.samples:
+                with st.expander(f"📋 Sample rows used for evaluation ({len(v.samples)}) — {v.rule_id}"):
+                    st.dataframe(pd.DataFrame(v.samples), use_container_width=True, hide_index=True)
 
     # ══════════════════════════════════════════════════════════════════════════
     # TAB 2 — Detailed Data

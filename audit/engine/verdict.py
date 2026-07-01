@@ -45,6 +45,8 @@ class RuleVerdict:
     finding:         str
     fail_examples:   list[dict] = field(default_factory=list)
     pass_examples:   list[dict] = field(default_factory=list)
+    miss_examples:   list[dict] = field(default_factory=list)
+    samples:         list[dict] = field(default_factory=list)  # judgment only
 
 
 def _formula_verdict(fr: FormulaResult, check: RuleCheck) -> RuleVerdict:
@@ -56,9 +58,10 @@ def _formula_verdict(fr: FormulaResult, check: RuleCheck) -> RuleVerdict:
     else:
         verdict, risk = "Fail",    "High"
 
+    applicable = fr.passed + fr.failed
     finding = (
-        f"{fr.passed:,} of {fr.passed + fr.failed:,} applicable rows comply ({pct}%). "
-        f"{fr.missing:,} rows had missing data for this check."
+        f"{fr.passed:,} of {applicable:,} evaluated rows comply ({pct}%). "
+        f"{fr.missing:,} rows skipped (filter not triggered or data not available — not counted)."
     )
     return RuleVerdict(
         rule_id=check.rule_id,
@@ -74,6 +77,7 @@ def _formula_verdict(fr: FormulaResult, check: RuleCheck) -> RuleVerdict:
         finding=finding,
         fail_examples=fr.fail_examples,
         pass_examples=fr.pass_examples,
+        miss_examples=fr.miss_examples,
     )
 
 
@@ -120,6 +124,7 @@ def _judgment_verdict(jr: JudgmentResult, check: RuleCheck) -> RuleVerdict:
         risk=risk, total_rows=jr.total_rows,
         pass_count=est_pass, fail_count=jr.total_rows - est_pass,
         missing_count=0, finding=finding,
+        samples=jr.samples,
     )
 
 

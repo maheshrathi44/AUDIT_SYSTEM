@@ -15,9 +15,10 @@ from dateutil.parser import ParserError
 
 from audit.llm.rule_check_generator import RuleCheck
 
-MAX_SAMPLES      = 20  # max sample rows per judgment rule
-MAX_EXAMPLES     = 5   # max fail examples per formula rule
-MAX_PASS_EXAMPLES = 3  # max pass examples per formula rule
+MAX_SAMPLES       = 20  # max sample rows per judgment rule
+MAX_EXAMPLES      = 5   # max fail examples per formula rule
+MAX_PASS_EXAMPLES = 3   # max pass examples per formula rule
+MAX_MISS_EXAMPLES = 3   # max missing examples per formula rule
 
 
 # ── date parsing ───────────────────────────────────────────────────────────────
@@ -49,11 +50,14 @@ class FormulaResult:
     missing:       int = 0
     fail_examples: list[dict] = field(default_factory=list)
     pass_examples: list[dict] = field(default_factory=list)
+    miss_examples: list[dict] = field(default_factory=list)
 
     @property
     def compliance_pct(self) -> float:
-        # missing = no data / filter not triggered → counts as passing
-        return round(100 * (self.passed + self.missing) / self.total, 1) if self.total else 0.0
+        # Only rows that were actually evaluated (pass or fail) count toward compliance.
+        # Missing rows (filter not triggered, blank data) are excluded from both numerator and denominator.
+        applicable = self.passed + self.failed
+        return round(100 * self.passed / applicable, 1) if applicable else 0.0
 
 
 @dataclass
@@ -169,6 +173,8 @@ def traverse(
                     fr.fail_examples.append(_example_row(row, check, ctx))
             else:
                 fr.missing += 1
+                if len(fr.miss_examples) < MAX_MISS_EXAMPLES:
+                    fr.miss_examples.append(_example_row(row, check, ctx))
 
         for check in judgment_checks:
             jr = j_results[check.rule_id]

@@ -39,6 +39,10 @@ DATE ROLES (be precise — do not use a generic date role):
 
 NON-DATE ROLES:
   case_id         — unique record identifier (ticket no., report no., record ID)
+  reopen_indicator — marks that a record was reopened, reactivated, or returned for re-investigation
+                     after being closed; look for suffixes, flags, or status values that imply
+                     the record went through a second lifecycle (e.g. a separate ID column for
+                     reactivated records, a boolean reopen flag, or a status meaning re-opened)
   status          — current state of the record (Open, Closed, Pending, etc.)
   category        — classification, ranking, type, grade, priority (A/B/C, Rank)
   description     — free-text description, remarks, repair contents, findings
