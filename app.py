@@ -72,7 +72,10 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-for k, v in [("page", "upload"), ("results", None), ("dark", False)]:
+for k, v in [
+    ("page", "upload"), ("results", None), ("dark", False),
+    ("phase1", None), ("phase2", None), ("audit_col_map", None),
+]:
     if k not in st.session_state:
         st.session_state[k] = v
 
@@ -486,30 +489,21 @@ def page_upload() -> None:
 
     if st.button("Run Audit  →", type="primary", disabled=not ready):
         doc_names = [f.name for f in supp_files] if supp_files else []
-        _run_pipeline(proc_files, dataset_file, doc_names)
+        _run_pipeline_phase1(proc_files, dataset_file, doc_names)
 
 
-def _run_pipeline(proc_files, dataset_file, supported_doc_names=None) -> None:
+def _run_pipeline_phase1(proc_files, dataset_file, doc_names=None) -> None:
     status   = st.empty()
     progress = st.progress(0)
-
-    step_map = {
-        "step 1": 5,  "extract": 12,
-        "step 2": 28, "column": 33, "read": 22,
-        "step 3": 44, "filter": 50,
-        "step 4": 55, "rule check": 62, "check": 62,
-        "step 5": 68, "travers": 72,
-        "step 6": 80, "verdict": 83,
-        "step 7": 90, "report": 93,
-    }
 
     def log(msg: str) -> None:
         status.info(msg)
         low = msg.lower()
-        for kw, pct in step_map.items():
-            if kw in low:
-                progress.progress(pct)
-                break
+        if "step 1" in low or "extract" in low: progress.progress(15)
+        elif "rules extracted" in low:           progress.progress(40)
+        elif "step 2" in low or "read" in low:  progress.progress(55)
+        elif "rows loaded" in low:              progress.progress(70)
+        elif "column mapping" in low:           progress.progress(90)
 
     with tempfile.TemporaryDirectory() as tmp:
         proc_paths = []
@@ -524,10 +518,10 @@ def _run_pipeline(proc_files, dataset_file, supported_doc_names=None) -> None:
             fout.write(dataset_file.getvalue())
 
         try:
-            from audit.pipeline_v2 import run_pipeline_v2
-            results = run_pipeline_v2(
+            from audit.pipeline_v2 import run_pipeline_phase1
+            phase1 = run_pipeline_phase1(
                 proc_paths, ds_path,
-                supported_doc_names=supported_doc_names or [],
+                supported_doc_names=doc_names or [],
                 on_progress=log,
             )
         except Exception as e:
@@ -539,13 +533,363 @@ def _run_pipeline(proc_files, dataset_file, supported_doc_names=None) -> None:
     progress.progress(100)
     status.empty()
     progress.empty()
-    st.session_state.results = results
-    st.session_state.page    = "results"
+    st.session_state.phase1 = phase1
+    st.session_state.page   = "col_review"
+    st.rerun()
+
+
+def _run_pipeline_phase2(phase1, col_map: dict) -> None:
+    """Runs step 3 (rule filter) then goes to rule_review page."""
+    status   = st.empty()
+    progress = st.progress(0)
+
+    def log(msg: str) -> None:
+        status.info(msg)
+        low = msg.lower()
+        if "filter" in low:    progress.progress(40)
+        elif "applicable" in low: progress.progress(80)
+
+    try:
+        from audit.pipeline_v2 import run_pipeline_phase2
+        phase2 = run_pipeline_phase2(phase1, col_map, on_progress=log)
+    except Exception as e:
+        status.empty()
+        progress.empty()
+        st.error(f"Rule filtering failed: {e}")
+        return
+
+    progress.progress(100)
+    status.empty()
+    progress.empty()
+    st.session_state.audit_col_map = col_map
+    st.session_state.phase2        = phase2
+    st.session_state.page          = "rule_review"
+    st.rerun()
+
+
+def _run_pipeline_phase3(phase1, col_map: dict, applicable_rules, dropped_rules: dict) -> None:
+    """Runs steps 4-7 with user-finalized rules then goes to results page."""
+    status   = st.empty()
+    progress = st.progress(0)
+
+    def log(msg: str) -> None:
+        status.info(msg)
+        low = msg.lower()
+        if "step 1" in low or "rule check" in low: progress.progress(15)
+        elif "formula check" in low:               progress.progress(35)
+        elif "step 2" in low or "travers" in low:  progress.progress(52)
+        elif "traversal complete" in low:          progress.progress(68)
+        elif "step 3" in low or "verdict" in low:  progress.progress(80)
+        elif "step 4" in low or "report" in low:   progress.progress(93)
+
+    try:
+        from audit.pipeline_v2 import run_pipeline_phase3
+        results = run_pipeline_phase3(
+            phase1, col_map, applicable_rules, dropped_rules,
+            on_progress=log,
+        )
+    except Exception as e:
+        status.empty()
+        progress.empty()
+        st.error(f"Pipeline failed: {e}")
+        return
+
+    progress.progress(100)
+    status.empty()
+    progress.empty()
+    st.session_state.results       = results
+    st.session_state.phase1        = None
+    st.session_state.phase2        = None
+    st.session_state.audit_col_map = None
+    st.session_state.page          = "results"
     st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE 2 — Results
+# PAGE 2 — Column Mapping Review
+# ══════════════════════════════════════════════════════════════════════════════
+
+_COL_ROLES = [
+    "date_reported", "date_closed", "date_received", "date_replied",
+    "date_approved", "date_deadline", "date_other",
+    "case_id", "reopen_indicator", "status", "category",
+    "description", "identifier", "document_ref", "numeric", "other",
+]
+_COL_TYPES = ["date", "text", "number", "status", "id", "boolean"]
+
+
+def page_col_review() -> None:
+    _inject_css()
+    t      = _c()
+    phase1 = st.session_state.phase1
+
+    _header("Column Mapping Review",
+            "Step 2 of 3 — Verify AI-generated column meanings before running the audit")
+
+    n_total    = len(phase1.headers)
+    n_relevant = sum(1 for h in phase1.headers if phase1.col_map.get(h, {}).get("audit_relevant"))
+
+    st.markdown(
+        f'<div style="background:{t["surface"]};border:1px solid {t["border"]};'
+        f'border-left:4px solid {t["accent"]};border-radius:10px;'
+        f'padding:14px 18px;margin-bottom:18px;font-size:13px;color:{t["text"]};line-height:1.6">'
+        f'The AI has mapped <b>{n_total}</b> columns and marked <b>{n_relevant}</b> as audit-relevant. '
+        f'Review each row below — correct meanings, adjust roles, and uncheck <b>Include in Audit</b> '
+        f'for columns that should not be used in compliance checks. '
+        f'<span style="color:{t["muted"]}">Changes here directly affect which rules run and how columns are matched.</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    rows = []
+    for col in phase1.headers:
+        info = phase1.col_map.get(col, {})
+        rows.append({
+            "Column":           col,
+            "Meaning":          info.get("meaning", ""),
+            "Semantic Role":    info.get("semantic_role", "other"),
+            "Data Type":        info.get("data_type", "text"),
+            "Include in Audit": True,
+        })
+
+    edited_df = st.data_editor(
+        pd.DataFrame(rows),
+        column_config={
+            "Column":           st.column_config.TextColumn("Column", disabled=True, width="medium"),
+            "Meaning":          st.column_config.TextColumn("Meaning (edit if wrong)", width="large"),
+            "Semantic Role":    st.column_config.SelectboxColumn("Semantic Role", options=_COL_ROLES, width="medium"),
+            "Data Type":        st.column_config.SelectboxColumn("Data Type", options=_COL_TYPES, width="small"),
+            "Include in Audit": st.column_config.CheckboxColumn("Include in Audit", width="small"),
+        },
+        use_container_width=True,
+        hide_index=True,
+        num_rows="fixed",
+        key="col_editor",
+    )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    cb, _, cp = st.columns([1, 4, 2])
+
+    with cb:
+        if st.button("← Back", key="col_back_btn"):
+            st.session_state.page   = "upload"
+            st.session_state.phase1 = None
+            st.rerun()
+
+    with cp:
+        if st.button("Proceed with Audit  →", type="primary", key="col_proceed_btn"):
+            updated_col_map: dict = {}
+            for _, row in edited_df.iterrows():
+                col_name = row["Column"]
+                updated_col_map[col_name] = {
+                    "meaning":       row["Meaning"],
+                    "semantic_role": row["Semantic Role"],
+                    "data_type":     row["Data Type"],
+                    "audit_relevant": bool(row["Include in Audit"]),
+                }
+            _run_pipeline_phase2(phase1, updated_col_map)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 3 — Rule Review
+# ══════════════════════════════════════════════════════════════════════════════
+
+_RULE_TYPES = [
+    "mandatory", "conditional", "timeline",
+    "document", "process", "quality", "other",
+]
+_PRIORITIES = ["Critical", "High", "Medium", "Low"]
+
+
+def _rr_init(phase1, phase2) -> None:
+    """Initialise or reset rule-review session state from phase2 results."""
+    all_by_id = {r.rule_id: r for r in phase1.all_rules}
+    applicable = [
+        {
+            "Rule ID":   r.rule_id,
+            "Statement": r.statement,
+            "Type":      r.rule_type,
+            "Priority":  r.priority.title(),
+        }
+        for r in phase2.applicable_rules
+    ]
+    dropped = [
+        {
+            "Rule ID":     rid,
+            "Statement":   all_by_id[rid].statement if rid in all_by_id else "",
+            "Drop Reason": reason,
+        }
+        for rid, reason in phase2.dropped_rules.items()
+        if rid in all_by_id
+    ]
+    st.session_state.rr_applicable = applicable
+    st.session_state.rr_dropped    = dropped
+    st.session_state.rr_phase2_id  = id(phase2)
+    st.session_state.rr_version    = 0   # bump to force data_editor reset
+
+
+def page_rule_review() -> None:
+    import dataclasses
+
+    _inject_css()
+    t       = _c()
+    phase1  = st.session_state.phase1
+    phase2  = st.session_state.phase2
+    col_map = st.session_state.audit_col_map or phase1.col_map
+
+    # Initialise live lists on first visit (or when phase2 changes)
+    if (
+        "rr_applicable" not in st.session_state
+        or st.session_state.get("rr_phase2_id") != id(phase2)
+    ):
+        _rr_init(phase1, phase2)
+
+    rr_app  = st.session_state.rr_applicable   # list[dict]
+    rr_drop = st.session_state.rr_dropped       # list[dict]
+    ver     = st.session_state.rr_version
+
+    _header("Rule Review",
+            "Step 3 of 4 — Review, edit and move rules freely before running the audit")
+
+    st.markdown(
+        f'<div style="background:{t["surface"]};border:1px solid {t["border"]};'
+        f'border-left:4px solid {t["accent"]};border-radius:10px;'
+        f'padding:14px 18px;margin-bottom:18px;font-size:13px;color:{t["text"]};line-height:1.6">'
+        f'<b>{len(rr_app)}</b> applicable &nbsp;·&nbsp; <b>{len(rr_drop)}</b> dropped. '
+        f'Edit statements inline. Use <b>Move to Dropped / Restore to Applicable</b> to transfer rules '
+        f'between sections — you can do this as many times as needed before proceeding.'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    tab_app, tab_drop = st.tabs([
+        f"Applicable Rules  ({len(rr_app)})",
+        f"Dropped Rules  ({len(rr_drop)})",
+    ])
+
+    # ── Applicable tab ──────────────────────────────────────────────────────
+    with tab_app:
+        edited_app = st.data_editor(
+            pd.DataFrame(rr_app) if rr_app else pd.DataFrame(
+                columns=["Rule ID", "Statement", "Type", "Priority"]
+            ),
+            column_config={
+                "Rule ID":   st.column_config.TextColumn("Rule ID",   disabled=True, width="small"),
+                "Statement": st.column_config.TextColumn("Statement (edit if needed)", width="large"),
+                "Type":      st.column_config.SelectboxColumn("Type",     options=_RULE_TYPES, width="small"),
+                "Priority":  st.column_config.SelectboxColumn("Priority", options=_PRIORITIES, width="small"),
+            },
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            key=f"rr_app_editor_{ver}",
+        )
+        # Always sync edits back so moves preserve the latest text
+        st.session_state.rr_applicable = edited_app.to_dict("records")
+
+        if rr_app:
+            st.markdown("<div style='margin-top:10px'></div>", unsafe_allow_html=True)
+            sel_drop, btn_drop = st.columns([5, 1])
+            with sel_drop:
+                to_drop = st.multiselect(
+                    "Select rules to move to Dropped:",
+                    options=[r["Rule ID"] for r in st.session_state.rr_applicable],
+                    key=f"rr_to_drop_{ver}",
+                )
+            with btn_drop:
+                st.markdown("<div style='margin-top:22px'></div>", unsafe_allow_html=True)
+                if st.button("→ Drop", key=f"rr_btn_drop_{ver}", disabled=not to_drop):
+                    ids = set(to_drop)
+                    moving  = [r for r in st.session_state.rr_applicable if r["Rule ID"] in ids]
+                    staying = [r for r in st.session_state.rr_applicable if r["Rule ID"] not in ids]
+                    for r in moving:
+                        r["Drop Reason"] = "moved to dropped by user"
+                    st.session_state.rr_applicable = staying
+                    st.session_state.rr_dropped.extend(moving)
+                    st.session_state.rr_version += 1
+                    st.rerun()
+
+    # ── Dropped tab ─────────────────────────────────────────────────────────
+    with tab_drop:
+        drop_cols = ["Rule ID", "Statement", "Drop Reason"]
+        edited_drop = st.data_editor(
+            pd.DataFrame(rr_drop)[drop_cols] if rr_drop else pd.DataFrame(columns=drop_cols),
+            column_config={
+                "Rule ID":     st.column_config.TextColumn("Rule ID",     disabled=True, width="small"),
+                "Statement":   st.column_config.TextColumn("Statement (edit if needed)", width="large"),
+                "Drop Reason": st.column_config.TextColumn("Reason", disabled=True, width="medium"),
+            },
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            key=f"rr_drop_editor_{ver}",
+        )
+        # Sync statement edits back (reason stays from session state)
+        if rr_drop:
+            edited_stmts = {row["Rule ID"]: row["Statement"] for _, row in edited_drop.iterrows()}
+            for r in st.session_state.rr_dropped:
+                if r["Rule ID"] in edited_stmts:
+                    r["Statement"] = edited_stmts[r["Rule ID"]]
+
+        if rr_drop:
+            st.markdown("<div style='margin-top:10px'></div>", unsafe_allow_html=True)
+            sel_rest, btn_rest = st.columns([5, 1])
+            with sel_rest:
+                to_restore = st.multiselect(
+                    "Select rules to restore to Applicable:",
+                    options=[r["Rule ID"] for r in st.session_state.rr_dropped],
+                    key=f"rr_to_restore_{ver}",
+                )
+            with btn_rest:
+                st.markdown("<div style='margin-top:22px'></div>", unsafe_allow_html=True)
+                if st.button("← Restore", key=f"rr_btn_restore_{ver}", disabled=not to_restore):
+                    ids = set(to_restore)
+                    moving  = [r for r in st.session_state.rr_dropped if r["Rule ID"] in ids]
+                    staying = [r for r in st.session_state.rr_dropped if r["Rule ID"] not in ids]
+                    for r in moving:
+                        r_clean = {k: v for k, v in r.items() if k != "Drop Reason"}
+                        st.session_state.rr_applicable.append(r_clean)
+                    st.session_state.rr_dropped = staying
+                    st.session_state.rr_version += 1
+                    st.rerun()
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    cb, _, cp = st.columns([1, 4, 2])
+
+    with cb:
+        if st.button("← Back", key="rule_back_btn"):
+            st.session_state.page   = "col_review"
+            st.session_state.phase2 = None
+            for k in ("rr_applicable", "rr_dropped", "rr_phase2_id", "rr_version"):
+                st.session_state.pop(k, None)
+            st.rerun()
+
+    with cp:
+        if st.button("Proceed with Audit  →", type="primary", key="rule_proceed_btn"):
+            all_by_id = {r.rule_id: r for r in phase1.all_rules}
+            final_applicable = []
+            final_dropped    = {r["Rule ID"]: r["Drop Reason"] for r in st.session_state.rr_dropped}
+
+            for row in st.session_state.rr_applicable:
+                rid = row["Rule ID"]
+                r   = all_by_id.get(rid)
+                if r:
+                    final_applicable.append(dataclasses.replace(
+                        r,
+                        statement=str(row["Statement"]),
+                        rule_type=str(row.get("Type", r.rule_type)),
+                        priority=str(row.get("Priority", r.priority)).lower(),
+                    ))
+
+            # Clean up rule-review state
+            for k in ("rr_applicable", "rr_dropped", "rr_phase2_id", "rr_version"):
+                st.session_state.pop(k, None)
+
+            _run_pipeline_phase3(phase1, col_map, final_applicable, final_dropped)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 4 — Results
 # ══════════════════════════════════════════════════════════════════════════════
 def page_results() -> None:
     _inject_css()
@@ -920,5 +1264,9 @@ def page_results() -> None:
 # ── Router ─────────────────────────────────────────────────────────────────────
 if st.session_state.page == "upload":
     page_upload()
+elif st.session_state.page == "col_review":
+    page_col_review()
+elif st.session_state.page == "rule_review":
+    page_rule_review()
 else:
     page_results()

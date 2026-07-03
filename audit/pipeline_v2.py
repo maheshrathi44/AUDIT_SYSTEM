@@ -1,15 +1,23 @@
 """
 Pipeline v2 — full dataset audit with single traversal.
 
-Flow:
-  1. Extract rules from procedures        (LLM — one call per procedure, cached by content hash)
-  2. Map dataset columns                  (LLM, once)
-  3. Filter rules to applicable ones      (LLM, once)
-  4. Generate Rule Checks                 (LLM, batched ~4 calls)
-  4b. Validate columns — drop any check whose required columns don't exist in dataset
-  5. Single dataset traversal             (zero LLM — pure Python)
-  6. Generate verdicts                    (zero LLM for formula; 1 call per judgment rule)
-  7. Write audit report                   (LLM, once)
+Three-phase design (user reviews between phases):
+  Phase 1:
+    1. Extract rules from procedures  (LLM)
+    2. Map dataset columns            (LLM)
+    → pause: user edits column meanings / drops columns
+
+  Phase 2:
+    3. Filter rules to applicable ones (LLM)
+    → pause: user reviews applicable/dropped rules, edits statements, restores dropped
+
+  Phase 3:
+    4. Generate Rule Checks           (LLM, batched)
+    4b. Validate columns              (zero LLM)
+    5. Single dataset traversal       (zero LLM)
+    5b. Post-traversal drop           (zero LLM)
+    6. Generate verdicts              (zero LLM for formula; 1 LLM call per judgment)
+    7. Write audit report             (LLM)
 """
 
 from __future__ import annotations
@@ -20,12 +28,30 @@ from typing import Callable
 
 from audit.engine.traversal import DetailedData, traverse
 from audit.engine.verdict import RuleVerdict, generate_verdicts
-from audit.extractors import get_sample_rows, read_excel_raw, read_procedure_file
+from audit.extractors import read_excel_raw, read_procedure_file
 from audit.llm import extract_rules_llm, map_columns
 from audit.llm.report_writer import AuditReport, generate_report
 from audit.llm.rule_check_generator import RuleCheck, generate_rule_checks
 from audit.llm.rule_filter import filter_rules
 from audit.schemas.rule_schema import DraftRule
+
+
+@dataclass
+class PipelinePhase1Result:
+    """Output of Phase 1 — stored in session state for user review before Phase 2."""
+    all_rules:           list[DraftRule]
+    headers:             list[str]
+    rows:                list[dict]
+    col_map:             dict
+    supported_doc_names: list[str] = field(default_factory=list)
+    warnings:            list[str] = field(default_factory=list)
+
+
+@dataclass
+class PipelinePhase2Result:
+    """Output of Phase 2 (step 3) — stored in session state for user rule review."""
+    applicable_rules: list[DraftRule]
+    dropped_rules:    dict[str, str]   # rule_id → reason
 
 
 @dataclass
@@ -41,6 +67,210 @@ class PipelineV2Result:
     report:           AuditReport
     total_rows:       int
     warnings:         list[str] = field(default_factory=list)
+
+
+_CASE_ID_MEANING_KEYWORDS = (
+    "primary key", "unique identifier", "case id", "record id",
+    "unique key", "ticket no", "report no", "ftir no", "unique no",
+)
+
+
+def _find_case_col(headers: list[str], col_map: dict) -> str | None:
+    """
+    Find the primary-key / case-ID column. Only considers audit-relevant columns.
+    First checks semantic_role == "case_id"; if not found, checks meaning text for
+    keywords like "primary key", "unique identifier", etc.
+    """
+    # Pass 1: explicit semantic role
+    for h in headers:
+        info = col_map.get(h, {})
+        if info.get("audit_relevant") and info.get("semantic_role") == "case_id":
+            return h
+    # Pass 2: user described it as primary key / unique identifier in meaning
+    for h in headers:
+        info = col_map.get(h, {})
+        if info.get("audit_relevant"):
+            meaning = info.get("meaning", "").lower()
+            if any(kw in meaning for kw in _CASE_ID_MEANING_KEYWORDS):
+                return h
+    return None
+
+
+def run_pipeline_phase1(
+    procedure_paths:    list[str],
+    dataset_path:       str,
+    supported_doc_names=None,
+    on_progress:        Callable[[str], None] | None = None,
+) -> PipelinePhase1Result:
+    """Steps 1-2 only. Returns phase1 result for user review of column meanings."""
+    warnings: list[str] = []
+    supported_doc_names = supported_doc_names or []
+
+    def log(msg: str) -> None:
+        if on_progress:
+            on_progress(msg)
+
+    log("Step 1/2 — Extracting rules from procedures...")
+    all_rules: list[DraftRule] = []
+    for path_str in procedure_paths:
+        path = Path(path_str)
+        log(f"  Reading: {path.name}")
+        doc = read_procedure_file(path_str)
+        for w in doc.warnings:
+            warnings.append(w)
+        rules  = extract_rules_llm(doc.text, source_name=path.name, procedure_id=path.stem)
+        prefix = path.stem[:8].upper().replace(" ", "_")
+        for r in rules:
+            r.rule_id = f"{prefix}_{r.rule_id}"
+        log(f"  {len(rules)} rules from {path.name}")
+        all_rules.extend(rules)
+    log(f"  Total: {len(all_rules)} rules extracted")
+
+    log("Step 2/2 — Reading dataset + mapping columns...")
+    headers, rows = read_excel_raw(dataset_path)
+    log(f"  {len(rows):,} rows loaded, {len(headers)} columns")
+    col_map = map_columns(headers, rows)
+    log(f"  Column mapping complete — review and edit before proceeding")
+
+    return PipelinePhase1Result(
+        all_rules=all_rules,
+        headers=headers,
+        rows=rows,
+        col_map=col_map,
+        supported_doc_names=supported_doc_names,
+        warnings=warnings,
+    )
+
+
+def run_pipeline_phase2(
+    phase1:      PipelinePhase1Result,
+    col_map:     dict,
+    on_progress: Callable[[str], None] | None = None,
+) -> PipelinePhase2Result:
+    """Step 3 only — filter rules. Returns phase2 result for user rule review."""
+    def log(msg: str) -> None:
+        if on_progress:
+            on_progress(msg)
+
+    log("Filtering rules applicable to this dataset...")
+    applicable_rules, dropped = filter_rules(phase1.all_rules, col_map)
+    log(f"  {len(applicable_rules)} applicable, {len(dropped)} dropped — review before proceeding")
+    return PipelinePhase2Result(applicable_rules=applicable_rules, dropped_rules=dropped)
+
+
+def run_pipeline_phase3(
+    phase1:           PipelinePhase1Result,
+    col_map:          dict,
+    applicable_rules: list[DraftRule],
+    dropped_rules:    dict[str, str],
+    on_progress:      Callable[[str], None] | None = None,
+) -> PipelineV2Result:
+    """Steps 4-7. Takes user-finalized rules from phase2 review."""
+    warnings = list(phase1.warnings)
+    headers  = phase1.headers
+    rows     = phase1.rows
+
+    def log(msg: str) -> None:
+        if on_progress:
+            on_progress(msg)
+
+    # Only pass audit-relevant columns to the LLM — dropped columns are invisible
+    audit_col_map = {k: v for k, v in col_map.items() if v.get("audit_relevant")}
+    audit_set     = set(audit_col_map.keys())          # columns the user kept
+    header_set    = set(headers)                        # all physical columns (existence check)
+    audit_cols    = [h for h in headers if h in audit_set]
+
+    log("Step 1/4 — Generating Rule Checks (batched LLM calls)...")
+    rule_checks = generate_rule_checks(
+        applicable_rules, audit_col_map,               # LLM only sees kept columns
+        supported_doc_names=phase1.supported_doc_names,
+    )
+
+    valid_checks: list[RuleCheck] = []
+    for check in rule_checks:
+        if check.check_type == "formula":
+            # column must physically exist AND not have been dropped by the user
+            if not check.column_a or check.column_a not in header_set:
+                dropped_rules[check.rule_id] = (
+                    f"required column '{check.column_a or 'unknown'}' not found in dataset"
+                )
+                continue
+            if check.column_a not in audit_set:
+                dropped_rules[check.rule_id] = (
+                    f"column '{check.column_a}' was excluded from audit by user"
+                )
+                continue
+            if check.column_b and check.column_b not in header_set:
+                dropped_rules[check.rule_id] = (
+                    f"required column '{check.column_b}' not found in dataset"
+                )
+                continue
+            # column_b dropped by user → just clear it (don't drop the whole rule)
+            if check.column_b and check.column_b not in audit_set:
+                check.column_b = ""
+            if check.filter_column and check.filter_column not in header_set:
+                check.filter_column = ""
+                check.filter_value  = ""
+        elif check.check_type == "judgment":
+            # only sample columns the user kept
+            valid_samples = [c for c in check.sample_columns if c in audit_set]
+            if not valid_samples:
+                dropped_rules[check.rule_id] = "no audit-relevant sample columns found in dataset"
+                continue
+            check.sample_columns = valid_samples
+        valid_checks.append(check)
+
+    rule_checks = valid_checks
+    valid_ids   = {c.rule_id for c in rule_checks}
+    applicable_rules = [r for r in applicable_rules if r.rule_id in valid_ids]
+    f_count = sum(1 for c in rule_checks if c.check_type == "formula")
+    j_count = sum(1 for c in rule_checks if c.check_type == "judgment")
+    log(f"  {f_count} formula checks, {j_count} judgment checks ({len(dropped_rules)} total dropped)")
+
+    # Case-ID column for richer examples — must be audit-relevant, detected by role OR meaning
+    case_col     = _find_case_col(headers, col_map)
+    context_cols = [case_col] if case_col else []
+
+    log(f"Step 2/4 — Traversing {len(rows):,} rows (zero LLM)...")
+    detailed_data = traverse(rows, rule_checks, context_columns=context_cols)
+
+    evaluable: list[RuleCheck] = []
+    for check in rule_checks:
+        if check.check_type == "formula":
+            fr = detailed_data.formula_results.get(check.rule_id)
+            if fr and fr.total > 0 and fr.passed == 0 and fr.failed == 0:
+                dropped_rules[check.rule_id] = (
+                    f"all {fr.total} rows returned missing — "
+                    f"filter condition never matched or column produced no evaluable values"
+                )
+                continue
+        evaluable.append(check)
+    rule_checks = evaluable
+    valid_ids = {c.rule_id for c in rule_checks}
+    applicable_rules = [r for r in applicable_rules if r.rule_id in valid_ids]
+    log("  Traversal complete")
+
+    log("Step 3/4 — Generating verdicts...")
+    verdicts = generate_verdicts(detailed_data, rule_checks, on_progress=log)
+    log(f"  {len(verdicts)} verdicts generated")
+
+    log("Step 4/4 — Writing audit report...")
+    report = generate_report(verdicts)
+    log("  Done")
+
+    return PipelineV2Result(
+        all_rules=phase1.all_rules,
+        applicable_rules=applicable_rules,
+        dropped_rules=dropped_rules,
+        col_map=col_map,
+        audit_cols=audit_cols,
+        rule_checks=rule_checks,
+        detailed_data=detailed_data,
+        verdicts=verdicts,
+        report=report,
+        total_rows=len(rows),
+        warnings=warnings,
+    )
 
 
 def run_pipeline_v2(
