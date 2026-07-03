@@ -86,10 +86,17 @@ def _run_formula(row: dict, check: RuleCheck) -> str:
     """
     # ── Conditional filter ────────────────────────────────────────────────────
     if check.filter_column and check.filter_value:
-        actual   = row.get(check.filter_column, "").strip().lower()
-        expected = check.filter_value.strip().lower()
-        if actual != expected:
-            return "missing"
+        actual = row.get(check.filter_column, "").strip()
+        fv     = check.filter_value.strip()
+        if fv == "(blank)":
+            if actual:           # column has a value → rule doesn't apply
+                return "missing"
+        elif fv == "(not blank)":
+            if not actual:       # column is blank → rule doesn't apply
+                return "missing"
+        else:
+            if actual.lower() != fv.lower():
+                return "missing"
 
     val_a = row.get(check.column_a, "").strip()
     val_b = row.get(check.column_b, "").strip() if check.column_b else ""

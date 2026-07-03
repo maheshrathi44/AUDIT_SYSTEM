@@ -158,38 +158,43 @@ def run_pipeline_phase2(
     return PipelinePhase2Result(applicable_rules=applicable_rules, dropped_rules=dropped)
 
 
+@dataclass
+class PipelinePhase3Result:
+    """Output of Phase 3 (step 4) — stored for user rule-check review."""
+    rule_checks:      list[RuleCheck]
+    dropped_rules:    dict[str, str]
+    applicable_rules: list[DraftRule]
+    audit_cols:       list[str]        # audit-relevant column names for UI selectors
+
+
 def run_pipeline_phase3(
     phase1:           PipelinePhase1Result,
     col_map:          dict,
     applicable_rules: list[DraftRule],
     dropped_rules:    dict[str, str],
     on_progress:      Callable[[str], None] | None = None,
-) -> PipelineV2Result:
-    """Steps 4-7. Takes user-finalized rules from phase2 review."""
-    warnings = list(phase1.warnings)
-    headers  = phase1.headers
-    rows     = phase1.rows
+) -> PipelinePhase3Result:
+    """Step 4 — generate + validate rule checks. Returns for user review."""
+    headers = phase1.headers
 
     def log(msg: str) -> None:
         if on_progress:
             on_progress(msg)
 
-    # Only pass audit-relevant columns to the LLM — dropped columns are invisible
     audit_col_map = {k: v for k, v in col_map.items() if v.get("audit_relevant")}
-    audit_set     = set(audit_col_map.keys())          # columns the user kept
-    header_set    = set(headers)                        # all physical columns (existence check)
+    audit_set     = set(audit_col_map.keys())
+    header_set    = set(headers)
     audit_cols    = [h for h in headers if h in audit_set]
 
-    log("Step 1/4 — Generating Rule Checks (batched LLM calls)...")
+    log("Generating Rule Checks (batched LLM calls)...")
     rule_checks = generate_rule_checks(
-        applicable_rules, audit_col_map,               # LLM only sees kept columns
+        applicable_rules, audit_col_map,
         supported_doc_names=phase1.supported_doc_names,
     )
 
     valid_checks: list[RuleCheck] = []
     for check in rule_checks:
         if check.check_type == "formula":
-            # column must physically exist AND not have been dropped by the user
             if not check.column_a or check.column_a not in header_set:
                 dropped_rules[check.rule_id] = (
                     f"required column '{check.column_a or 'unknown'}' not found in dataset"
@@ -205,14 +210,12 @@ def run_pipeline_phase3(
                     f"required column '{check.column_b}' not found in dataset"
                 )
                 continue
-            # column_b dropped by user → just clear it (don't drop the whole rule)
             if check.column_b and check.column_b not in audit_set:
                 check.column_b = ""
             if check.filter_column and check.filter_column not in header_set:
                 check.filter_column = ""
                 check.filter_value  = ""
         elif check.check_type == "judgment":
-            # only sample columns the user kept
             valid_samples = [c for c in check.sample_columns if c in audit_set]
             if not valid_samples:
                 dropped_rules[check.rule_id] = "no audit-relevant sample columns found in dataset"
@@ -220,18 +223,42 @@ def run_pipeline_phase3(
             check.sample_columns = valid_samples
         valid_checks.append(check)
 
-    rule_checks = valid_checks
-    valid_ids   = {c.rule_id for c in rule_checks}
+    valid_ids        = {c.rule_id for c in valid_checks}
     applicable_rules = [r for r in applicable_rules if r.rule_id in valid_ids]
-    f_count = sum(1 for c in rule_checks if c.check_type == "formula")
-    j_count = sum(1 for c in rule_checks if c.check_type == "judgment")
-    log(f"  {f_count} formula checks, {j_count} judgment checks ({len(dropped_rules)} total dropped)")
+    f_count = sum(1 for c in valid_checks if c.check_type == "formula")
+    j_count = sum(1 for c in valid_checks if c.check_type == "judgment")
+    log(f"  {f_count} formula checks, {j_count} judgment checks — review before proceeding")
 
-    # Case-ID column for richer examples — must be audit-relevant, detected by role OR meaning
+    return PipelinePhase3Result(
+        rule_checks=valid_checks,
+        dropped_rules=dropped_rules,
+        applicable_rules=applicable_rules,
+        audit_cols=audit_cols,
+    )
+
+
+def run_pipeline_phase4(
+    phase1:           PipelinePhase1Result,
+    col_map:          dict,
+    rule_checks:      list[RuleCheck],
+    applicable_rules: list[DraftRule],
+    dropped_rules:    dict[str, str],
+    on_progress:      Callable[[str], None] | None = None,
+) -> PipelineV2Result:
+    """Steps 5-7 — traverse, verdicts, report. Takes user-edited rule checks."""
+    warnings = list(phase1.warnings)
+    headers  = phase1.headers
+    rows     = phase1.rows
+    audit_cols = [h for h in headers if col_map.get(h, {}).get("audit_relevant")]
+
+    def log(msg: str) -> None:
+        if on_progress:
+            on_progress(msg)
+
     case_col     = _find_case_col(headers, col_map)
     context_cols = [case_col] if case_col else []
 
-    log(f"Step 2/4 — Traversing {len(rows):,} rows (zero LLM)...")
+    log(f"Step 1/3 — Traversing {len(rows):,} rows (zero LLM)...")
     detailed_data = traverse(rows, rule_checks, context_columns=context_cols)
 
     evaluable: list[RuleCheck] = []
@@ -250,11 +277,11 @@ def run_pipeline_phase3(
     applicable_rules = [r for r in applicable_rules if r.rule_id in valid_ids]
     log("  Traversal complete")
 
-    log("Step 3/4 — Generating verdicts...")
+    log("Step 2/3 — Generating verdicts...")
     verdicts = generate_verdicts(detailed_data, rule_checks, on_progress=log)
     log(f"  {len(verdicts)} verdicts generated")
 
-    log("Step 4/4 — Writing audit report...")
+    log("Step 3/3 — Writing audit report...")
     report = generate_report(verdicts)
     log("  Done")
 

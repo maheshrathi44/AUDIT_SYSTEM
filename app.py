@@ -74,7 +74,7 @@ st.set_page_config(
 
 for k, v in [
     ("page", "upload"), ("results", None), ("dark", False),
-    ("phase1", None), ("phase2", None), ("audit_col_map", None),
+    ("phase1", None), ("phase2", None), ("phase3", None), ("audit_col_map", None),
 ]:
     if k not in st.session_state:
         st.session_state[k] = v
@@ -568,24 +568,54 @@ def _run_pipeline_phase2(phase1, col_map: dict) -> None:
 
 
 def _run_pipeline_phase3(phase1, col_map: dict, applicable_rules, dropped_rules: dict) -> None:
-    """Runs steps 4-7 with user-finalized rules then goes to results page."""
+    """Runs step 4 (rule check generation) then goes to rule_check_review page."""
     status   = st.empty()
     progress = st.progress(0)
 
     def log(msg: str) -> None:
         status.info(msg)
         low = msg.lower()
-        if "step 1" in low or "rule check" in low: progress.progress(15)
-        elif "formula check" in low:               progress.progress(35)
-        elif "step 2" in low or "travers" in low:  progress.progress(52)
-        elif "traversal complete" in low:          progress.progress(68)
-        elif "step 3" in low or "verdict" in low:  progress.progress(80)
-        elif "step 4" in low or "report" in low:   progress.progress(93)
+        if "generating" in low:   progress.progress(20)
+        elif "formula check" in low: progress.progress(60)
+        elif "review" in low:     progress.progress(90)
 
     try:
         from audit.pipeline_v2 import run_pipeline_phase3
-        results = run_pipeline_phase3(
+        phase3 = run_pipeline_phase3(
             phase1, col_map, applicable_rules, dropped_rules,
+            on_progress=log,
+        )
+    except Exception as e:
+        status.empty()
+        progress.empty()
+        st.error(f"Rule check generation failed: {e}")
+        return
+
+    progress.progress(100)
+    status.empty()
+    progress.empty()
+    st.session_state.phase3 = phase3
+    st.session_state.page   = "rule_check_review"
+    st.rerun()
+
+
+def _run_pipeline_phase4(phase1, col_map: dict, rule_checks, applicable_rules, dropped_rules: dict) -> None:
+    """Runs steps 5-7 (traverse, verdicts, report) then goes to results page."""
+    status   = st.empty()
+    progress = st.progress(0)
+
+    def log(msg: str) -> None:
+        status.info(msg)
+        low = msg.lower()
+        if "step 1" in low or "travers" in low:  progress.progress(20)
+        elif "traversal complete" in low:        progress.progress(55)
+        elif "step 2" in low or "verdict" in low: progress.progress(70)
+        elif "step 3" in low or "report" in low:  progress.progress(90)
+
+    try:
+        from audit.pipeline_v2 import run_pipeline_phase4
+        results = run_pipeline_phase4(
+            phase1, col_map, rule_checks, applicable_rules, dropped_rules,
             on_progress=log,
         )
     except Exception as e:
@@ -600,6 +630,7 @@ def _run_pipeline_phase3(phase1, col_map: dict, applicable_rules, dropped_rules:
     st.session_state.results       = results
     st.session_state.phase1        = None
     st.session_state.phase2        = None
+    st.session_state.phase3        = None
     st.session_state.audit_col_map = None
     st.session_state.page          = "results"
     st.rerun()
@@ -889,7 +920,222 @@ def page_rule_review() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE 4 — Results
+# PAGE 4 — Rule Check Review
+# ══════════════════════════════════════════════════════════════════════════════
+
+_COMPUTATIONS = ["not_blank", "is_blank", "date_difference", "value_contains"]
+_COMP_LABELS  = {
+    "not_blank":       "not_blank — field must be filled",
+    "is_blank":        "is_blank — field must be empty",
+    "date_difference": "date_difference — gap between two date columns",
+    "value_contains":  "value_contains — column must contain a keyword",
+}
+
+
+def page_rule_check_review() -> None:
+    import dataclasses
+
+    _inject_css()
+    t      = _c()
+    phase1 = st.session_state.phase1
+    phase3 = st.session_state.phase3
+    col_map = st.session_state.audit_col_map or phase1.col_map
+
+    audit_cols = phase3.audit_cols   # ordered list of kept columns
+    _NONE      = "(none)"
+    col_opts   = [_NONE] + audit_cols
+
+    _header("Rule Check Review",
+            "Step 4 of 5 — Verify how each rule will be computed before running the audit")
+
+    f_count = sum(1 for c in phase3.rule_checks if c.check_type == "formula")
+    j_count = sum(1 for c in phase3.rule_checks if c.check_type == "judgment")
+
+    st.markdown(
+        f'<div style="background:{t["surface"]};border:1px solid {t["border"]};'
+        f'border-left:4px solid {t["accent"]};border-radius:10px;'
+        f'padding:14px 18px;margin-bottom:6px;font-size:13px;color:{t["text"]};line-height:1.7">'
+        f'<b>{f_count} formula</b> checks and <b>{j_count} judgment</b> checks were generated. '
+        f'Review each one — change the check type, formula, or columns if the AI got it wrong. '
+        f'Your changes are applied exactly to the audit.'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Legend
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(
+            f'<div style="background:{t["pass_bg"]};border:1px solid {t["border"]};'
+            f'border-radius:8px;padding:10px 14px;margin-bottom:16px;font-size:12px;color:{t["text"]}">'
+            f'<b style="color:{t["pass_fg"]}">Formula</b> — deterministic, runs on every row, '
+            f'zero LLM. Checks a specific column or date gap. Fast and exact.'
+            f'</div>', unsafe_allow_html=True)
+    with c2:
+        st.markdown(
+            f'<div style="background:{t["miss_bg"]};border:1px solid {t["border"]};'
+            f'border-radius:8px;padding:10px 14px;margin-bottom:16px;font-size:12px;color:{t["text"]}">'
+            f'<b style="color:{t["miss_fg"]}">Judgment</b> — AI reads a sample of rows and '
+            f'estimates compliance. Use when a formula cannot capture the rule intent.'
+            f'</div>', unsafe_allow_html=True)
+
+    # ── One expander per rule check ──────────────────────────────────────────
+    for check in phase3.rule_checks:
+        rid    = check.rule_id
+        is_fml = st.session_state.get(f"rc_{rid}_type", check.check_type) == "formula"
+
+        exp_label = (
+            f"{rid}  ·  "
+            + ("formula" if is_fml else "judgment")
+            + (f"  ·  {check.computation}" if is_fml and check.computation else "")
+        )
+        with st.expander(exp_label):
+            st.markdown(
+                f'<div style="font-size:12.5px;color:{t["muted"]};'
+                f'margin-bottom:10px;line-height:1.5">{check.rule.statement}</div>',
+                unsafe_allow_html=True,
+            )
+
+            # Check type toggle
+            cur_type = st.radio(
+                "Check type",
+                ["formula", "judgment"],
+                index=0 if check.check_type == "formula" else 1,
+                key=f"rc_{rid}_type",
+                horizontal=True,
+            )
+            is_fml = cur_type == "formula"
+            st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
+
+            if is_fml:
+                ca, cb = st.columns(2)
+                with ca:
+                    comp_idx = _COMPUTATIONS.index(check.computation) if check.computation in _COMPUTATIONS else 0
+                    comp = st.selectbox(
+                        "Computation",
+                        options=_COMPUTATIONS,
+                        format_func=lambda x: _COMP_LABELS.get(x, x),
+                        index=comp_idx,
+                        key=f"rc_{rid}_comp",
+                    )
+                with cb:
+                    cola_idx = col_opts.index(check.column_a) if check.column_a in col_opts else 0
+                    st.selectbox("Column A (main column)", col_opts, index=cola_idx, key=f"rc_{rid}_col_a")
+
+                if st.session_state.get(f"rc_{rid}_comp", comp) == "date_difference":
+                    cd, ce, cf = st.columns(3)
+                    with cd:
+                        colb_idx = col_opts.index(check.column_b) if check.column_b in col_opts else 0
+                        st.selectbox("Column B (end date)", col_opts, index=colb_idx, key=f"rc_{rid}_col_b")
+                    with ce:
+                        st.selectbox("Condition", ["<=", ">="],
+                                     index=0 if check.pass_condition != ">=" else 1,
+                                     key=f"rc_{rid}_cond")
+                    with cf:
+                        st.number_input("Threshold (days)", min_value=1,
+                                        value=int(check.threshold or 7),
+                                        key=f"rc_{rid}_threshold")
+
+                elif st.session_state.get(f"rc_{rid}_comp", comp) == "value_contains":
+                    st.text_input("Must contain (keyword / value)",
+                                  value=check.pass_condition or "",
+                                  key=f"rc_{rid}_cond")
+
+                # Conditional filter (optional)
+                show_filter = st.checkbox(
+                    "Add conditional filter (only apply this check when a column equals a value)",
+                    value=bool(check.filter_column),
+                    key=f"rc_{rid}_show_filter",
+                )
+                if show_filter:
+                    fg, fv = st.columns(2)
+                    with fg:
+                        fcol_idx = col_opts.index(check.filter_column) if check.filter_column in col_opts else 0
+                        st.selectbox("Filter column", col_opts, index=fcol_idx, key=f"rc_{rid}_fcol")
+                    with fv:
+                        # Build value options from actual column data + blank sentinels
+                        sel_fcol = st.session_state.get(f"rc_{rid}_fcol", check.filter_column) or ""
+                        if sel_fcol and sel_fcol != _NONE:
+                            distinct_vals = list(dict.fromkeys(
+                                str(r.get(sel_fcol, "")).strip()
+                                for r in phase1.rows
+                                if str(r.get(sel_fcol, "")).strip()
+                            ))
+                        else:
+                            distinct_vals = []
+                        fv_opts  = ["(blank)", "(not blank)"] + distinct_vals
+                        cur_fval = check.filter_value or "(blank)"
+                        fv_idx   = fv_opts.index(cur_fval) if cur_fval in fv_opts else 0
+                        st.selectbox("Filter value", fv_opts, index=fv_idx, key=f"rc_{rid}_fval")
+
+            else:
+                # Judgment fields
+                default_samp = [c for c in check.sample_columns if c in audit_cols]
+                st.multiselect("Sample columns (columns the AI will read to evaluate this rule)",
+                               options=audit_cols, default=default_samp, key=f"rc_{rid}_sample_cols")
+                st.text_area("Judgment question",
+                             value=check.judgment_question or "",
+                             height=70, key=f"rc_{rid}_question")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    cb_btn, _, cp_btn = st.columns([1, 4, 2])
+
+    with cb_btn:
+        if st.button("← Back", key="rcr_back_btn"):
+            st.session_state.page   = "rule_review"
+            st.session_state.phase3 = None
+            st.rerun()
+
+    with cp_btn:
+        if st.button("Proceed with Audit  →", type="primary", key="rcr_proceed_btn"):
+            final_checks = []
+            for check in phase3.rule_checks:
+                rid      = check.rule_id
+                new_type = st.session_state.get(f"rc_{rid}_type", check.check_type)
+
+                if new_type == "formula":
+                    col_a = st.session_state.get(f"rc_{rid}_col_a", check.column_a)
+                    col_b = st.session_state.get(f"rc_{rid}_col_b", check.column_b)
+                    comp  = st.session_state.get(f"rc_{rid}_comp",  check.computation)
+                    cond  = st.session_state.get(f"rc_{rid}_cond",  check.pass_condition)
+                    thr   = st.session_state.get(f"rc_{rid}_threshold", check.threshold)
+                    show_f = st.session_state.get(f"rc_{rid}_show_filter", bool(check.filter_column))
+                    fcol   = st.session_state.get(f"rc_{rid}_fcol", check.filter_column) if show_f else ""
+                    fval   = st.session_state.get(f"rc_{rid}_fval", check.filter_value)  if show_f else ""
+                    final_checks.append(dataclasses.replace(
+                        check,
+                        check_type    = "formula",
+                        column_a      = "" if col_a == _NONE else (col_a or ""),
+                        column_b      = "" if col_b == _NONE else (col_b or ""),
+                        computation   = comp or "",
+                        pass_condition= str(cond) if cond is not None else "",
+                        threshold     = int(thr) if thr is not None else None,
+                        filter_column = "" if fcol == _NONE else (fcol or ""),
+                        filter_value  = fval or "",
+                        sample_columns= [],
+                        judgment_question="",
+                    ))
+                else:
+                    samp_cols = st.session_state.get(f"rc_{rid}_sample_cols", check.sample_columns)
+                    question  = st.session_state.get(f"rc_{rid}_question", check.judgment_question)
+                    final_checks.append(dataclasses.replace(
+                        check,
+                        check_type      = "judgment",
+                        sample_columns  = list(samp_cols) if samp_cols else [],
+                        judgment_question= question or "",
+                        column_a="", column_b="", computation="",
+                        pass_condition="", threshold=None,
+                        filter_column="", filter_value="",
+                    ))
+
+            _run_pipeline_phase4(
+                phase1, col_map, final_checks,
+                phase3.applicable_rules, dict(phase3.dropped_rules),
+            )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 5 — Results
 # ══════════════════════════════════════════════════════════════════════════════
 def page_results() -> None:
     _inject_css()
@@ -1268,5 +1514,7 @@ elif st.session_state.page == "col_review":
     page_col_review()
 elif st.session_state.page == "rule_review":
     page_rule_review()
+elif st.session_state.page == "rule_check_review":
+    page_rule_check_review()
 else:
     page_results()
