@@ -15,19 +15,26 @@ from audit.llm.client import chat
 from audit.llm.rule_check_generator import RuleCheck
 
 _JUDGMENT_SYSTEM = """\
-You are an auditor. Given a rule and a sample of data rows, estimate compliance.
+You are an auditor. Given a rule and a list of data rows, classify EACH row individually.
 
 Return ONLY valid JSON:
 {
-  "compliance_pct": 65,
-  "verdict": "Partial",
-  "risk": "Medium",
-  "finding": "2-3 sentence explanation based on what the sample rows show"
+  "evaluations": [
+    {"row_index": 0, "verdict": "pass"},
+    {"row_index": 1, "verdict": "fail"},
+    {"row_index": 2, "verdict": "indeterminate"}
+  ],
+  "finding": "2-3 sentence overall summary of what the data shows",
+  "risk": "Medium"
 }
 
-verdict : Pass (>= 90% comply)  |  Partial (50-89%)  |  Fail (< 50%)
-risk    : High (critical breach) | Medium (partial)   | Low (minor gap)
-compliance_pct: your best estimate of % compliance across ALL rows based on the sample"""
+verdict per row — choose exactly one:
+  "pass"          — this row complies with the rule
+  "fail"          — this row violates the rule
+  "indeterminate" — insufficient evidence in this row to decide
+
+risk (for the overall finding): High | Medium | Low
+You MUST return one evaluation object per row, using the exact row_index from the input."""
 
 
 @dataclass
@@ -82,13 +89,15 @@ def _formula_verdict(fr: FormulaResult, check: RuleCheck) -> RuleVerdict:
 
 
 def _judgment_verdict(jr: JudgmentResult, check: RuleCheck) -> RuleVerdict:
-    applicable = jr.total_rows - jr.missing   # rows where filter matched
-
+    """
+    Per-row LLM evaluation — every applicable row is classified pass/fail/indeterminate.
+    Produces actual fail_examples and pass_examples just like formula rules.
+    """
     if not jr.samples:
         finding = (
-            "No usable sample data found for this rule."
+            "No usable data found for this rule."
             if jr.missing == 0
-            else f"All {jr.total_rows:,} rows did not match the filter condition — none were applicable."
+            else f"All {jr.total_rows:,} rows did not match the filter — none were applicable."
         )
         return RuleVerdict(
             rule_id=check.rule_id, rule_statement=check.rule.statement,
@@ -98,9 +107,10 @@ def _judgment_verdict(jr: JudgmentResult, check: RuleCheck) -> RuleVerdict:
             finding=finding,
         )
 
-    samples_text = "\n".join(
+    # 0-based row indices so LLM row_index maps directly to jr.samples list
+    rows_text = "\n".join(
         f"Row {i}: " + " | ".join(f"{k}: {v}" for k, v in s.items())
-        for i, s in enumerate(jr.samples, 1)
+        for i, s in enumerate(jr.samples)
     )
 
     response = chat(
@@ -109,31 +119,60 @@ def _judgment_verdict(jr: JudgmentResult, check: RuleCheck) -> RuleVerdict:
             {"role": "user", "content": (
                 f"Rule: {check.rule.statement}\n"
                 f"Question: {check.judgment_question}\n\n"
-                f"ALL applicable rows ({applicable:,} rows — {jr.missing:,} skipped as not applicable):\n"
-                f"{samples_text}"
+                f"Evaluate each of these {len(jr.samples):,} rows "
+                f"({jr.missing:,} rows excluded by filter):\n\n"
+                f"{rows_text}"
             )},
         ],
         json_mode=True,
     )
 
     try:
-        data    = json.loads(response)
-        pct     = float(data.get("compliance_pct", 0))
-        verdict = data.get("verdict", "Partial")
-        risk    = data.get("risk", "Medium")
-        finding = data.get("finding", "")
+        data        = json.loads(response)
+        evaluations = data.get("evaluations", [])
+        finding     = data.get("finding", "")
+        risk        = data.get("risk", "Medium")
     except (json.JSONDecodeError, ValueError):
-        pct, verdict, risk, finding = 0.0, "Missing", "Medium", "Evaluation failed."
+        evaluations, finding, risk = [], "Evaluation failed.", "Medium"
 
-    est_pass = round(applicable * pct / 100)
-    est_fail = applicable - est_pass
+    # Map per-row verdicts back to actual row dicts
+    pass_rows:  list[dict] = []
+    fail_rows:  list[dict] = []
+    indet_rows: list[dict] = []
+    for ev in evaluations:
+        idx = ev.get("row_index", -1)
+        if 0 <= idx < len(jr.samples):
+            v = (ev.get("verdict") or "indeterminate").strip().lower()
+            if v == "pass":
+                pass_rows.append(jr.samples[idx])
+            elif v == "fail":
+                fail_rows.append(jr.samples[idx])
+            else:
+                indet_rows.append(jr.samples[idx])
+
+    pass_count = len(pass_rows)
+    fail_count = len(fail_rows)
+    evaluated  = pass_count + fail_count
+    pct        = round(100 * pass_count / evaluated, 1) if evaluated else 0.0
+
+    if pct >= 90:   verdict_str = "Pass"
+    elif pct >= 50: verdict_str = "Partial"
+    else:           verdict_str = "Fail"
+
+    # missing = filter-excluded rows + rows LLM couldn't evaluate
+    total_missing = jr.missing + len(indet_rows)
+
     return RuleVerdict(
         rule_id=check.rule_id, rule_statement=check.rule.statement,
-        check_type="judgment", verdict=verdict, compliance_pct=pct,
+        check_type="judgment", verdict=verdict_str, compliance_pct=pct,
         risk=risk, total_rows=jr.total_rows,
-        pass_count=est_pass, fail_count=est_fail,
-        missing_count=jr.missing, finding=finding,
-        samples=jr.samples,
+        pass_count=pass_count, fail_count=fail_count,
+        missing_count=total_missing,
+        finding=finding,
+        fail_examples=fail_rows[:5],
+        pass_examples=pass_rows[:5],
+        miss_examples=indet_rows[:5],
+        samples=jr.samples,   # all applicable rows for "view all" expander
     )
 
 

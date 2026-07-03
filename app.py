@@ -1380,7 +1380,7 @@ def page_results() -> None:
                     st.dataframe(pd.DataFrame(v.miss_examples), use_container_width=True, hide_index=True)
 
             if v.samples:
-                with st.expander(f"📋 Sample rows used for evaluation ({len(v.samples)}) — {v.rule_id}"):
+                with st.expander(f"📋 All rows evaluated ({len(v.samples)}) — {v.rule_id}"):
                     st.dataframe(pd.DataFrame(v.samples), use_container_width=True, hide_index=True)
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -1491,6 +1491,11 @@ def page_results() -> None:
                         f' &nbsp;·&nbsp; {n_missing:,} rows not applicable (excluded from compliance)</div>'
                     )
 
+                # Pull verdict for this rule to show pass/fail counts
+                jv = next((v for v in results.verdicts if v.rule_id == ch.rule_id), None)
+                j_pass = jv.pass_count if jv else 0
+                j_fail = jv.fail_count if jv else 0
+
                 st.markdown(
                     f'<div class="dcard">'
                     f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">'
@@ -1505,7 +1510,8 @@ def page_results() -> None:
                     f'<i>"{ch.judgment_question}"</i>'
                     f'</div>'
                     f'<div style="display:flex;gap:20px;margin-top:10px">'
-                    f'<span><b style="color:{t["text"]}">{n_applicable:,}</b> <span style="color:{t["muted"]};font-size:11px">applicable rows</span></span>'
+                    f'<span><b style="color:#22c55e">{j_pass:,}</b> <span style="color:{t["muted"]};font-size:11px">pass</span></span>'
+                    f'<span><b style="color:#ef4444">{j_fail:,}</b> <span style="color:{t["muted"]};font-size:11px">fail</span></span>'
                     f'<span><b style="color:{t["muted"]}">{n_missing:,}</b> <span style="color:{t["muted"]};font-size:11px">not applicable</span></span>'
                     f'<span><b style="color:{t["text"]}">{n_total:,}</b> <span style="color:{t["muted"]};font-size:11px">total rows</span></span>'
                     f'</div>'
