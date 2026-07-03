@@ -82,13 +82,20 @@ def _formula_verdict(fr: FormulaResult, check: RuleCheck) -> RuleVerdict:
 
 
 def _judgment_verdict(jr: JudgmentResult, check: RuleCheck) -> RuleVerdict:
+    applicable = jr.total_rows - jr.missing   # rows where filter matched
+
     if not jr.samples:
+        finding = (
+            "No usable sample data found for this rule."
+            if jr.missing == 0
+            else f"All {jr.total_rows:,} rows did not match the filter condition — none were applicable."
+        )
         return RuleVerdict(
             rule_id=check.rule_id, rule_statement=check.rule.statement,
             check_type="judgment", verdict="Missing", compliance_pct=0.0,
             risk="Medium", total_rows=jr.total_rows,
-            pass_count=0, fail_count=0, missing_count=jr.total_rows,
-            finding="No usable sample data found in dataset for this rule.",
+            pass_count=0, fail_count=0, missing_count=jr.missing,
+            finding=finding,
         )
 
     samples_text = "\n".join(
@@ -102,7 +109,8 @@ def _judgment_verdict(jr: JudgmentResult, check: RuleCheck) -> RuleVerdict:
             {"role": "user", "content": (
                 f"Rule: {check.rule.statement}\n"
                 f"Question: {check.judgment_question}\n\n"
-                f"Sample ({len(jr.samples)} rows of {jr.total_rows:,} total):\n{samples_text}"
+                f"ALL applicable rows ({applicable:,} rows — {jr.missing:,} skipped as not applicable):\n"
+                f"{samples_text}"
             )},
         ],
         json_mode=True,
@@ -117,13 +125,14 @@ def _judgment_verdict(jr: JudgmentResult, check: RuleCheck) -> RuleVerdict:
     except (json.JSONDecodeError, ValueError):
         pct, verdict, risk, finding = 0.0, "Missing", "Medium", "Evaluation failed."
 
-    est_pass = int(jr.total_rows * pct / 100)
+    est_pass = round(applicable * pct / 100)
+    est_fail = applicable - est_pass
     return RuleVerdict(
         rule_id=check.rule_id, rule_statement=check.rule.statement,
         check_type="judgment", verdict=verdict, compliance_pct=pct,
         risk=risk, total_rows=jr.total_rows,
-        pass_count=est_pass, fail_count=jr.total_rows - est_pass,
-        missing_count=0, finding=finding,
+        pass_count=est_pass, fail_count=est_fail,
+        missing_count=jr.missing, finding=finding,
         samples=jr.samples,
     )
 

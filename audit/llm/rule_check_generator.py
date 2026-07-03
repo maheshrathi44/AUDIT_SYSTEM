@@ -131,9 +131,12 @@ class RuleCheck:
     check_type:  str          # "formula" or "judgment"
     description: str = ""
 
-    # conditional filter (optional) — formula only runs on rows where filter_column == filter_value
+    # conditional filter — rows that don't match are treated as missing (excluded from compliance)
+    # Single-condition (LLM-generated or legacy):
     filter_column: str = ""
     filter_value:  str = ""
+    # Multi-condition (user-set in page 4 UI — AND logic):
+    filter_conditions: list[dict] = field(default_factory=list)  # [{"column": ..., "value": ...}]
 
     # formula fields
     column_a:      str        = ""

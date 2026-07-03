@@ -923,6 +923,84 @@ def page_rule_review() -> None:
 # PAGE 4 — Rule Check Review
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _render_filter_ui(rid: str, check, col_opts: list, phase1) -> None:
+    """
+    Multi-condition AND filter UI. Conditions stored in session state.
+    Bumps a version counter on add/remove so widget keys reset cleanly.
+    """
+    _NONE_OPT = col_opts[0]  # "(none)"
+    fcond_key = f"rc_{rid}_fconds"
+    fcver_key = f"rc_{rid}_fcv"
+
+    if fcond_key not in st.session_state:
+        if check.filter_column and check.filter_column in col_opts:
+            st.session_state[fcond_key] = [{"col": check.filter_column, "val": check.filter_value or ""}]
+        else:
+            st.session_state[fcond_key] = []
+    if fcver_key not in st.session_state:
+        st.session_state[fcver_key] = 0
+
+    fconds = st.session_state[fcond_key]
+    fcver  = st.session_state[fcver_key]
+
+    show_filter = st.checkbox(
+        "Add conditional filter — only evaluate rows where column(s) match value(s) [AND logic]",
+        value=bool(fconds),
+        key=f"rc_{rid}_show_filter",
+    )
+    if not show_filter:
+        if fconds:
+            st.session_state[fcond_key] = []
+        return
+
+    if not fconds:
+        st.session_state[fcond_key] = [{"col": _NONE_OPT, "val": ""}]
+        fconds = st.session_state[fcond_key]
+
+    def _save(fconds: list, rid: str, ver: int) -> None:
+        for j in range(len(fconds)):
+            fconds[j]["col"] = st.session_state.get(f"rc_{rid}_fccol_{j}_{ver}", fconds[j]["col"])
+            fconds[j]["val"] = st.session_state.get(f"rc_{rid}_fcval_{j}_{ver}", fconds[j]["val"])
+
+    for i, cond in enumerate(list(fconds)):
+        fc1, fc2, fc3 = st.columns([3, 3, 1])
+        with fc1:
+            fcol_idx = col_opts.index(cond["col"]) if cond["col"] in col_opts else 0
+            st.selectbox(
+                f"Column {i+1}", col_opts, index=fcol_idx,
+                key=f"rc_{rid}_fccol_{i}_{fcver}",
+            )
+        with fc2:
+            sel_col = st.session_state.get(f"rc_{rid}_fccol_{i}_{fcver}", cond["col"]) or ""
+            if sel_col and sel_col != _NONE_OPT:
+                dist_vals = list(dict.fromkeys(
+                    str(r.get(sel_col) or "").strip()
+                    for r in phase1.rows
+                    if str(r.get(sel_col) or "").strip()
+                ))
+            else:
+                dist_vals = []
+            fv_opts = ["(blank)", "(not blank)"] + dist_vals
+            cur_val = cond["val"] if cond["val"] in fv_opts else (fv_opts[0] if fv_opts else "")
+            st.selectbox(
+                f"Value {i+1}", fv_opts,
+                index=fv_opts.index(cur_val) if cur_val in fv_opts else 0,
+                key=f"rc_{rid}_fcval_{i}_{fcver}",
+            )
+        with fc3:
+            st.markdown("<div style='margin-top:26px'></div>", unsafe_allow_html=True)
+            if len(fconds) > 1 and st.button("✕", key=f"rc_{rid}_fcrm_{i}_{fcver}"):
+                _save(fconds, rid, fcver)
+                fconds.pop(i)
+                st.session_state[fcver_key] += 1
+                st.rerun()
+
+    if st.button("+ Add AND condition", key=f"rc_{rid}_fcadd_{fcver}"):
+        _save(fconds, rid, fcver)
+        fconds.append({"col": _NONE_OPT, "val": ""})
+        st.session_state[fcver_key] += 1
+        st.rerun()
+
 _COMPUTATIONS = ["not_blank", "is_blank", "date_difference", "value_contains"]
 _COMP_LABELS  = {
     "not_blank":       "not_blank — field must be filled",
@@ -1041,32 +1119,8 @@ def page_rule_check_review() -> None:
                                   value=check.pass_condition or "",
                                   key=f"rc_{rid}_cond")
 
-                # Conditional filter (optional)
-                show_filter = st.checkbox(
-                    "Add conditional filter (only apply this check when a column equals a value)",
-                    value=bool(check.filter_column),
-                    key=f"rc_{rid}_show_filter",
-                )
-                if show_filter:
-                    fg, fv = st.columns(2)
-                    with fg:
-                        fcol_idx = col_opts.index(check.filter_column) if check.filter_column in col_opts else 0
-                        st.selectbox("Filter column", col_opts, index=fcol_idx, key=f"rc_{rid}_fcol")
-                    with fv:
-                        # Build value options from actual column data + blank sentinels
-                        sel_fcol = st.session_state.get(f"rc_{rid}_fcol", check.filter_column) or ""
-                        if sel_fcol and sel_fcol != _NONE:
-                            distinct_vals = list(dict.fromkeys(
-                                str(r.get(sel_fcol, "")).strip()
-                                for r in phase1.rows
-                                if str(r.get(sel_fcol, "")).strip()
-                            ))
-                        else:
-                            distinct_vals = []
-                        fv_opts  = ["(blank)", "(not blank)"] + distinct_vals
-                        cur_fval = check.filter_value or "(blank)"
-                        fv_idx   = fv_opts.index(cur_fval) if cur_fval in fv_opts else 0
-                        st.selectbox("Filter value", fv_opts, index=fv_idx, key=f"rc_{rid}_fval")
+                # Conditional filter (multi-column AND)
+                _render_filter_ui(rid, check, col_opts, phase1)
 
             else:
                 # Judgment fields
@@ -1076,6 +1130,9 @@ def page_rule_check_review() -> None:
                 st.text_area("Judgment question",
                              value=check.judgment_question or "",
                              height=70, key=f"rc_{rid}_question")
+
+                # Optional filter for judgment checks (multi-condition)
+                _render_filter_ui(rid, check, col_opts, phase1)
 
     st.markdown("<br>", unsafe_allow_html=True)
     cb_btn, _, cp_btn = st.columns([1, 4, 2])
@@ -1088,10 +1145,28 @@ def page_rule_check_review() -> None:
 
     with cp_btn:
         if st.button("Proceed with Audit  →", type="primary", key="rcr_proceed_btn"):
+
+            def _read_filter_conds(rid: str) -> list[dict]:
+                """Read multi-condition filter from session state for a given rule id."""
+                show_f = st.session_state.get(f"rc_{rid}_show_filter", False)
+                if not show_f:
+                    return []
+                fconds = st.session_state.get(f"rc_{rid}_fconds", [])
+                fcver  = st.session_state.get(f"rc_{rid}_fcv", 0)
+                result = []
+                for i, cond in enumerate(fconds):
+                    col = st.session_state.get(f"rc_{rid}_fccol_{i}_{fcver}", cond.get("col", ""))
+                    val = st.session_state.get(f"rc_{rid}_fcval_{i}_{fcver}", cond.get("val", ""))
+                    if col and col != _NONE and val:
+                        result.append({"column": col, "value": val})
+                return result
+
             final_checks = []
             for check in phase3.rule_checks:
                 rid      = check.rule_id
                 new_type = st.session_state.get(f"rc_{rid}_type", check.check_type)
+                filter_conditions = _read_filter_conds(rid)
+                fc1 = filter_conditions[0] if filter_conditions else {}
 
                 if new_type == "formula":
                     col_a = st.session_state.get(f"rc_{rid}_col_a", check.column_a)
@@ -1099,33 +1174,33 @@ def page_rule_check_review() -> None:
                     comp  = st.session_state.get(f"rc_{rid}_comp",  check.computation)
                     cond  = st.session_state.get(f"rc_{rid}_cond",  check.pass_condition)
                     thr   = st.session_state.get(f"rc_{rid}_threshold", check.threshold)
-                    show_f = st.session_state.get(f"rc_{rid}_show_filter", bool(check.filter_column))
-                    fcol   = st.session_state.get(f"rc_{rid}_fcol", check.filter_column) if show_f else ""
-                    fval   = st.session_state.get(f"rc_{rid}_fval", check.filter_value)  if show_f else ""
                     final_checks.append(dataclasses.replace(
                         check,
-                        check_type    = "formula",
-                        column_a      = "" if col_a == _NONE else (col_a or ""),
-                        column_b      = "" if col_b == _NONE else (col_b or ""),
-                        computation   = comp or "",
-                        pass_condition= str(cond) if cond is not None else "",
-                        threshold     = int(thr) if thr is not None else None,
-                        filter_column = "" if fcol == _NONE else (fcol or ""),
-                        filter_value  = fval or "",
-                        sample_columns= [],
-                        judgment_question="",
+                        check_type        = "formula",
+                        column_a          = "" if col_a == _NONE else (col_a or ""),
+                        column_b          = "" if col_b == _NONE else (col_b or ""),
+                        computation       = comp or "",
+                        pass_condition    = str(cond) if cond is not None else "",
+                        threshold         = int(thr) if thr is not None else None,
+                        filter_column     = fc1.get("column", ""),
+                        filter_value      = fc1.get("value", ""),
+                        filter_conditions = filter_conditions,
+                        sample_columns    = [],
+                        judgment_question = "",
                     ))
                 else:
                     samp_cols = st.session_state.get(f"rc_{rid}_sample_cols", check.sample_columns)
                     question  = st.session_state.get(f"rc_{rid}_question", check.judgment_question)
                     final_checks.append(dataclasses.replace(
                         check,
-                        check_type      = "judgment",
-                        sample_columns  = list(samp_cols) if samp_cols else [],
-                        judgment_question= question or "",
-                        column_a="", column_b="", computation="",
-                        pass_condition="", threshold=None,
-                        filter_column="", filter_value="",
+                        check_type        = "judgment",
+                        sample_columns    = list(samp_cols) if samp_cols else [],
+                        judgment_question = question or "",
+                        column_a          = "", column_b="", computation="",
+                        pass_condition    = "", threshold=None,
+                        filter_column     = fc1.get("column", ""),
+                        filter_value      = fc1.get("value", ""),
+                        filter_conditions = filter_conditions,
                     ))
 
             _run_pipeline_phase4(
@@ -1402,9 +1477,19 @@ def page_results() -> None:
             )
             for ch in judgment_checks:
                 jr = results.detailed_data.judgment_results.get(ch.rule_id)
-                n_samples  = len(jr.samples)   if jr else 0
                 n_total    = jr.total_rows      if jr else 0
                 cols_str   = ", ".join(f'"{c}"' for c in ch.sample_columns) if ch.sample_columns else "—"
+
+                n_missing  = jr.missing if jr else 0
+                n_applicable = n_total - n_missing
+                jfilter_display = ""
+                if ch.filter_column and ch.filter_value:
+                    jfilter_display = (
+                        f'<div style="font-size:11.5px;color:{t["muted"]};margin-top:3px">'
+                        f'Filter: <b style="color:{t["text"]}">{ch.filter_column}</b>'
+                        f' = <b style="color:{t["accent"]}">{ch.filter_value}</b>'
+                        f' &nbsp;·&nbsp; {n_missing:,} rows not applicable (excluded from compliance)</div>'
+                    )
 
                 st.markdown(
                     f'<div class="dcard">'
@@ -1413,13 +1498,15 @@ def page_results() -> None:
                     f'<span class="badge b-medium" style="font-size:10px">judgment</span>'
                     f'</div>'
                     f'<div class="dcard-body">'
-                    f'<span style="color:{t["muted"]}">Sampled:</span> {cols_str}'
+                    f'<span style="color:{t["muted"]}">Columns:</span> {cols_str}'
                     f'</div>'
+                    f'{jfilter_display}'
                     f'<div class="dcard-meta" style="margin-top:4px">'
                     f'<i>"{ch.judgment_question}"</i>'
                     f'</div>'
                     f'<div style="display:flex;gap:20px;margin-top:10px">'
-                    f'<span><b style="color:{t["text"]}">{n_samples}</b> <span style="color:{t["muted"]};font-size:11px">samples collected</span></span>'
+                    f'<span><b style="color:{t["text"]}">{n_applicable:,}</b> <span style="color:{t["muted"]};font-size:11px">applicable rows</span></span>'
+                    f'<span><b style="color:{t["muted"]}">{n_missing:,}</b> <span style="color:{t["muted"]};font-size:11px">not applicable</span></span>'
                     f'<span><b style="color:{t["text"]}">{n_total:,}</b> <span style="color:{t["muted"]};font-size:11px">total rows</span></span>'
                     f'</div>'
                     f'</div>',

@@ -15,7 +15,6 @@ from dateutil.parser import ParserError
 
 from audit.llm.rule_check_generator import RuleCheck
 
-MAX_SAMPLES       = 20  # max sample rows per judgment rule
 MAX_EXAMPLES      = 5   # max fail examples per formula rule
 MAX_PASS_EXAMPLES = 3   # max pass examples per formula rule
 MAX_MISS_EXAMPLES = 3   # max missing examples per formula rule
@@ -64,6 +63,7 @@ class FormulaResult:
 class JudgmentResult:
     rule_id:    str
     total_rows: int = 0
+    missing:    int = 0   # rows where filter condition didn't apply
     samples:    list[dict] = field(default_factory=list)
 
 
@@ -76,27 +76,45 @@ class DetailedData:
 
 # ── per-row formula execution ──────────────────────────────────────────────────
 
+def _row_matches_condition(row: dict, col: str, val: str) -> bool:
+    """True if the row satisfies a single column=value condition."""
+    actual = str(row.get(col) or "").strip()
+    if val == "(blank)":
+        return not actual
+    if val == "(not blank)":
+        return bool(actual)
+    return actual.lower() == val.lower()
+
+
+def _filter_applies(row: dict, check: RuleCheck) -> bool:
+    """
+    Returns True if this row should be EVALUATED (filter conditions are all satisfied).
+    Returns False if the row doesn't match the filter → treated as 'missing'.
+
+    Priority: filter_conditions list (AND logic) → single filter_column/filter_value fallback.
+    """
+    conditions = check.filter_conditions
+    if conditions:
+        return all(
+            _row_matches_condition(row, c.get("column", ""), c.get("value", ""))
+            for c in conditions
+            if c.get("column") and c.get("value")
+        )
+    if check.filter_column and check.filter_value:
+        return _row_matches_condition(row, check.filter_column, check.filter_value)
+    return True  # no filter — evaluate all rows
+
+
 def _run_formula(row: dict, check: RuleCheck) -> str:
     """
     Returns 'pass', 'fail', or 'missing'.
 
-    If filter_column + filter_value are set, the formula only runs on rows
-    where filter_column matches filter_value.
-    Non-matching rows return 'missing' → still count toward compliance.
+    Rows that don't satisfy the filter conditions return 'missing'
+    (excluded from compliance denominator).
     """
     # ── Conditional filter ────────────────────────────────────────────────────
-    if check.filter_column and check.filter_value:
-        actual = row.get(check.filter_column, "").strip()
-        fv     = check.filter_value.strip()
-        if fv == "(blank)":
-            if actual:           # column has a value → rule doesn't apply
-                return "missing"
-        elif fv == "(not blank)":
-            if not actual:       # column is blank → rule doesn't apply
-                return "missing"
-        else:
-            if actual.lower() != fv.lower():
-                return "missing"
+    if not _filter_applies(row, check):
+        return "missing"
 
     val_a = row.get(check.column_a, "").strip()
     val_b = row.get(check.column_b, "").strip() if check.column_b else ""
@@ -186,15 +204,20 @@ def traverse(
         for check in judgment_checks:
             jr = j_results[check.rule_id]
             jr.total_rows += 1
-            if len(jr.samples) < MAX_SAMPLES:
-                # collect only the columns specific to THIS judgment rule
-                sample = {
-                    col: row.get(col, "")
-                    for col in (ctx + check.sample_columns)
-                    if row.get(col, "").strip()
-                }
-                if sample:
-                    jr.samples.append(sample)
+
+            # Apply filter — rows that don't match go to missing, not samples
+            if not _filter_applies(row, check):
+                jr.missing += 1
+                continue
+
+            # Collect ALL applicable rows — no sampling cap
+            sample = {
+                col: row.get(col, "")
+                for col in (ctx + check.sample_columns)
+                if row.get(col, "").strip()
+            }
+            if sample:
+                jr.samples.append(sample)
 
     return DetailedData(
         formula_results=f_results,
