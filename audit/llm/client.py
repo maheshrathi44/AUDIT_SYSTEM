@@ -23,6 +23,7 @@ Corporate network options (add to .env if needed):
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import httpx
@@ -32,6 +33,9 @@ from openai import OpenAI
 # Load .env from project root (two levels up from this file)
 _env_path = Path(__file__).resolve().parent.parent.parent / ".env"
 load_dotenv(_env_path)
+
+# Regex to strip markdown code fences (```json ... ``` or ``` ... ```)
+_CODE_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
 
 
 def _client() -> OpenAI:
@@ -45,16 +49,9 @@ def _client() -> OpenAI:
             "  AUDIT_API_KEY=your_key_here\n"
         )
 
-    # SSL verification — disable if corporate proxy intercepts HTTPS (AUDIT_SSL_VERIFY=0)
     ssl_raw    = os.environ.get("AUDIT_SSL_VERIFY", "1").strip().lower()
     ssl_verify = ssl_raw not in ("0", "false", "no")
-
-    # Proxy — reads HTTPS_PROXY / HTTP_PROXY from .env or system environment
-    proxy = (
-        os.environ.get("HTTPS_PROXY")
-        or os.environ.get("HTTP_PROXY")
-        or None
-    )
+    proxy      = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or None
 
     http_client = httpx.Client(verify=ssl_verify, proxy=proxy)
     return OpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
@@ -64,16 +61,44 @@ def get_model() -> str:
     return os.environ.get("AUDIT_MODEL", "gpt-4o-mini")
 
 
-def chat(messages: list[dict], *, json_mode: bool = False) -> str:
-    """Call LLM and return response text."""
-    kwargs: dict = {}
-    if json_mode:
-        kwargs["response_format"] = {"type": "json_object"}
+def _strip_fences(text: str) -> str:
+    """Remove markdown code fences that some models wrap JSON in."""
+    text = text.strip()
+    m = _CODE_FENCE_RE.search(text)
+    return m.group(1).strip() if m else text
 
-    resp = _client().chat.completions.create(
-        model=get_model(),
-        messages=messages,
-        temperature=0,
-        **kwargs,
-    )
-    return resp.choices[0].message.content or ""
+
+def chat(messages: list[dict], *, json_mode: bool = False) -> str:
+    """
+    Call LLM and return response text.
+    json_mode=True: tries response_format first; falls back gracefully if unsupported.
+    Always strips markdown code fences from the response.
+    """
+    client = _client()
+    model  = get_model()
+
+    if json_mode:
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0,
+                response_format={"type": "json_object"},
+            )
+        except Exception:
+            # Model doesn't support response_format — retry without it
+            resp = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0,
+            )
+    else:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0,
+        )
+
+    content = resp.choices[0].message.content or ""
+    # Always strip code fences — some models wrap JSON in ```json ... ```
+    return _strip_fences(content) if json_mode else content
