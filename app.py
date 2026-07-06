@@ -1227,8 +1227,10 @@ def page_results() -> None:
             st.session_state.results = None
             st.rerun()
 
+    _OCR_NOISE = ("ocr", "scanned pdf", "very little text", "text extracted")
     for w in results.warnings:
-        st.warning(w)
+        if not any(kw in w.lower() for kw in _OCR_NOISE):
+            st.warning(w)
 
     # ── KPI strip ─────────────────────────────────────────────────────────────
     kpis = [
@@ -1379,9 +1381,6 @@ def page_results() -> None:
                 with st.expander(f"– Sample missing ({len(v.miss_examples)}) — {v.rule_id}"):
                     st.dataframe(pd.DataFrame(v.miss_examples), use_container_width=True, hide_index=True)
 
-            if v.samples:
-                with st.expander(f"📋 All rows evaluated ({len(v.samples)}) — {v.rule_id}"):
-                    st.dataframe(pd.DataFrame(v.samples), use_container_width=True, hide_index=True)
 
     # ══════════════════════════════════════════════════════════════════════════
     # TAB 2 — Detailed Data

@@ -1,0 +1,10 @@
+streamlit
+openai
+python-dotenv
+pandas
+openpyxl
+python-dateutil
+python-docx
+pymupdf
+pdf2image
+pytesseract
