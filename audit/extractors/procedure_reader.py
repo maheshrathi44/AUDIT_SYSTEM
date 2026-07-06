@@ -14,20 +14,25 @@ PDF flow:
 
 from __future__ import annotations
 
-from pathlib import Path                                                                                                                                                                                                                                                                
+from pathlib import Path
+import os
+
+from dotenv import load_dotenv
 
 from audit.schemas.procedure_schema import ProcedureDocument
 
 
-OCR_THRESHOLD = 100
+load_dotenv()
 
+
+OCR_THRESHOLD = 100
 
 
 def _read_pdf(file_path: Path) -> tuple[str, list[str], str]:
     warnings: list[str] = []
 
     try:
-        import fitz  # type: ignore
+        import fitz
     except ImportError:
         return (
             "",
@@ -50,10 +55,15 @@ def _read_pdf(file_path: Path) -> tuple[str, list[str], str]:
     )
 
     try:
-        from pdf2image import convert_from_path  # type: ignore
-        import pytesseract  # type: ignore
+        from pdf2image import convert_from_path
+        import pytesseract
 
-        images = convert_from_path(str(file_path))
+        poppler_path = os.getenv("POPPLER_PATH")
+
+        images = convert_from_path(
+            str(file_path),
+            poppler_path=poppler_path
+        )
 
         ocr_text = []
 
@@ -64,7 +74,9 @@ def _read_pdf(file_path: Path) -> tuple[str, list[str], str]:
 
         text = "\n".join(ocr_text).strip()
 
-        warnings.append("Scanned PDF detected. OCR used.")
+        warnings.append(
+            "Scanned PDF detected. OCR used."
+        )
 
         return text, warnings, "ocr"
 
@@ -75,12 +87,22 @@ def _read_pdf(file_path: Path) -> tuple[str, list[str], str]:
 
         return text, warnings, "pdf_text"
 
+    except Exception as e:
+        warnings.append(
+            f"OCR failed: {e}"
+        )
+
+        return text, warnings, "pdf_text"
+
 
 def _read_docx(file_path: Path) -> tuple[str, list[str]]:
     try:
-        from docx import Document  # type: ignore
+        from docx import Document
+
     except ImportError:
-        return "", ["python-docx is not installed."]
+        return "", [
+            "python-docx is not installed."
+        ]
 
     document = Document(str(file_path))
 
@@ -93,17 +115,24 @@ def _read_docx(file_path: Path) -> tuple[str, list[str]]:
 
 
 def _read_text(file_path: Path) -> tuple[str, list[str]]:
-    for encoding in ("utf-8", "latin-1", "utf-16"):
+    for encoding in (
+        "utf-8",
+        "latin-1",
+        "utf-16"
+    ):
         try:
-            return file_path.read_text(
-                encoding=encoding
-            ).strip(), []
+            return (
+                file_path.read_text(
+                    encoding=encoding
+                ).strip(),
+                []
+            )
 
         except UnicodeDecodeError:
             continue
 
     return "", [
-        "Could not decode the text file with utf-8, latin-1, or utf-16."
+        "Could not decode the text file."
     ]
 
 
