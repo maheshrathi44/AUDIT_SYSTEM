@@ -65,9 +65,10 @@ def _formula_verdict(fr: FormulaResult, check: RuleCheck) -> RuleVerdict:
     else:
         verdict, risk = "Fail",    "High"
 
-    applicable = fr.passed + fr.failed
+    applicable   = fr.passed + fr.failed
+    non_comp_pct = round(100 - pct, 1)
     finding = (
-        f"{fr.passed:,} of {applicable:,} evaluated rows comply ({pct}%). "
+        f"{fr.failed:,} of {applicable:,} evaluated rows are non-compliant ({non_comp_pct}%). "
         f"{fr.missing:,} rows skipped (filter not triggered or data not available — not counted)."
     )
     return RuleVerdict(

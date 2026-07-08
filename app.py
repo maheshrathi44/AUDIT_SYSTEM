@@ -319,9 +319,14 @@ def _kpi(label: str, value: str) -> str:
 
 
 def _bar_color(pct: float) -> str:
-    if pct >= 90: return "#22c55e"
-    if pct >= 60: return "#f59e0b"
-    return "#ef4444"
+    """pct is compliance %; color is for the non-compliance bar (inverted)."""
+    if pct >= 90: return "#22c55e"   # low non-compliance → green
+    if pct >= 60: return "#f59e0b"   # medium → amber
+    return "#ef4444"                  # high non-compliance → red
+
+def _nc_pct(compliance_pct: float) -> float:
+    """Convert compliance % to non-compliance %."""
+    return round(100 - compliance_pct, 1)
 
 
 def _cbar(pct: float) -> str:
@@ -1238,7 +1243,7 @@ def page_results() -> None:
         ("Rules Audited",     str(report.total_rules_audited)),
         ("Passed",            str(len(report.passed_rules))),
         ("Failed / Partial",  f"{len(report.failed_rules)} / {len(report.partial_rules)}"),
-        ("Overall Compliance", f"{report.overall_compliance_pct}%"),
+        ("Non-Compliance", f"{_nc_pct(report.overall_compliance_pct)}%"),
         ("Overall Risk",      report.overall_risk),
     ]
     st.markdown(
@@ -1288,17 +1293,18 @@ def page_results() -> None:
 
         header_html = (
             "<thead><tr>"
-            "<th>Rule ID</th><th>Verdict</th><th>Compliance</th><th>Risk</th>"
+            "<th>Rule ID</th><th>Verdict</th><th>Non-Compliance</th><th>Risk</th>"
             "<th>Total</th><th>Pass</th><th>Fail</th><th>Missing</th>"
             "</tr></thead>"
         )
         rows_html = ""
         for v in results.verdicts:
+            nc = _nc_pct(v.compliance_pct)
             rows_html += (
                 f"<tr>"
                 f'<td><a class="rid-link" href="#vcard-{v.rule_id}">{v.rule_id}</a></td>'
                 f"<td>{_badge(v.verdict)}</td>"
-                f'<td style="color:{_bar_color(v.compliance_pct)};font-weight:600">{v.compliance_pct}%</td>'
+                f'<td style="color:{_bar_color(v.compliance_pct)};font-weight:600">{nc}%</td>'
                 f"<td>{_risk_badge(v.risk)}</td>"
                 f'<td style="color:{t["text"]}">{v.total_rows:,}</td>'
                 f'<td class="num-pass">{v.pass_count:,}</td>'
@@ -1362,8 +1368,8 @@ def page_results() -> None:
                 + _stat(v.total_rows,    "Total",   t["text"])
                 + f'<div style="margin-left:auto;text-align:right">'
                   f'<div style="font-size:24px;font-weight:700;color:{_bar_color(v.compliance_pct)}">'
-                  f'{v.compliance_pct}%</div>'
-                  f'<div style="font-size:10px;color:{t["muted"]};text-transform:uppercase">Compliance</div>'
+                  f'{_nc_pct(v.compliance_pct)}%</div>'
+                  f'<div style="font-size:10px;color:{t["muted"]};text-transform:uppercase">Non-Compliance</div>'
                   f'</div>'
                 + f'</div></div>',
                 unsafe_allow_html=True,
@@ -1459,7 +1465,7 @@ def page_results() -> None:
                     f'<span><b style="color:#ef4444">{fail_c:,}</b> <span style="color:{t["muted"]};font-size:11px">fail</span></span>'
                     f'<span><b style="color:{t["muted"]}">{miss_c:,}</b> <span style="color:{t["muted"]};font-size:11px">missing</span></span>'
                     f'<span><b style="color:{t["text"]}">{total_c:,}</b> <span style="color:{t["muted"]};font-size:11px">total</span></span>'
-                    f'<span style="margin-left:auto"><b style="color:{_bar_color(pct)}">{pct}%</b> <span style="color:{t["muted"]};font-size:11px">compliance</span></span>'
+                    f'<span style="margin-left:auto"><b style="color:{_bar_color(pct)}">{_nc_pct(pct)}%</b> <span style="color:{t["muted"]};font-size:11px">non-compliance</span></span>'
                     f'</div>'
                     f'{warn_note}'
                     f'</div>',
