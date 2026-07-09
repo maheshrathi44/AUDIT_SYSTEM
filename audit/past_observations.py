@@ -1,0 +1,116 @@
+"""
+Past Observations — portable export of a completed audit's confirmed decisions.
+
+Captures what a user confirmed on the Column Mapping, Rule Review, and Rule Check
+Review pages so a future audit against a same-schema dataset (in a later session)
+can pre-fill those decisions instead of re-asking the LLM and the user.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+from datetime import datetime, timezone
+
+from audit.schemas.rule_schema import DraftRule
+
+FORMAT_VERSION = 1
+
+_REQUIRED_KEYS = {"col_map", "applicable_rules", "dropped_rules", "rule_checks"}
+
+
+def build_past_observations(results, dataset_name: str) -> dict:
+    """Serialize the confirmed decisions from a completed audit into a portable dict."""
+    procedure_names = sorted({r.source_name for r in results.all_rules})
+    return {
+        "format_version":      FORMAT_VERSION,
+        "generated_at":        datetime.now(timezone.utc).isoformat(),
+        "source_dataset_name": dataset_name,
+        "procedure_names":     procedure_names,
+        "columns":             sorted(results.col_map.keys()),
+        "col_map":             results.col_map,
+        "applicable_rules":    [dataclasses.asdict(r) for r in results.applicable_rules],
+        "dropped_rules":       results.dropped_rules,
+        "rule_checks":         [dataclasses.asdict(c) for c in results.rule_checks],
+    }
+
+
+def dumps(results, dataset_name: str) -> str:
+    return json.dumps(build_past_observations(results, dataset_name), indent=2)
+
+
+def load(raw: str | bytes) -> dict | None:
+    """Parse + validate a Past Observations file. Returns None if invalid/unsupported."""
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict) or data.get("format_version") != FORMAT_VERSION:
+        return None
+    if not _REQUIRED_KEYS.issubset(data.keys()):
+        return None
+    return data
+
+
+# ── Partial-reuse matching — every function below returns (reused, remaining) ──
+# so the caller only needs to send the "remaining" half to the LLM.
+
+def split_columns(past: dict, headers: list[str]) -> tuple[dict, list[str]]:
+    """Column mapping reuse — matched by exact column name."""
+    saved_col_map = past.get("col_map", {})
+    reused: dict = {}
+    remaining: list[str] = []
+    for h in headers:
+        if h in saved_col_map:
+            reused[h] = saved_col_map[h]
+        else:
+            remaining.append(h)
+    return reused, remaining
+
+
+def split_rules(
+    past: dict, rules: list[DraftRule],
+) -> tuple[list[DraftRule], dict[str, str], list[DraftRule]]:
+    """
+    Rule-filter reuse — matched by (rule_id, statement) for applicable rules
+    (both must match, since a changed procedure sentence should be re-judged),
+    or by rule_id alone for previously-dropped rules.
+    Returns (reused_applicable, reused_dropped, remaining_rules_needing_llm_filter).
+    """
+    saved_applicable_keys = {
+        (r.get("rule_id", ""), r.get("statement", "")) for r in past.get("applicable_rules", [])
+    }
+    saved_dropped = past.get("dropped_rules", {})
+
+    reused_applicable: list[DraftRule] = []
+    reused_dropped: dict[str, str] = {}
+    remaining: list[DraftRule] = []
+
+    for r in rules:
+        if (r.rule_id, r.statement) in saved_applicable_keys:
+            reused_applicable.append(r)
+        elif r.rule_id in saved_dropped:
+            reused_dropped[r.rule_id] = saved_dropped[r.rule_id]
+        else:
+            remaining.append(r)
+
+    return reused_applicable, reused_dropped, remaining
+
+
+def split_rule_checks(
+    past: dict, applicable_rules: list[DraftRule],
+) -> tuple[list[dict], list[DraftRule]]:
+    """
+    Rule-check reuse — matched by rule_id only (a rule check depends on the current
+    dataset's columns, not the rule wording, so no statement match needed here).
+    Returns (reused_check_dicts, remaining_rules_needing_llm_generation).
+    """
+    saved_checks_by_id = {c.get("rule_id", ""): c for c in past.get("rule_checks", [])}
+    reused: list[dict] = []
+    remaining: list[DraftRule] = []
+    for r in applicable_rules:
+        if r.rule_id in saved_checks_by_id:
+            reused.append(saved_checks_by_id[r.rule_id])
+        else:
+            remaining.append(r)
+    return reused, remaining

@@ -26,12 +26,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from audit import past_observations as po
 from audit.engine.traversal import DetailedData, traverse
 from audit.engine.verdict import RuleVerdict, generate_verdicts
 from audit.extractors import read_excel_raw, read_procedure_file
 from audit.llm import extract_rules_llm, map_columns
 from audit.llm.report_writer import AuditReport, generate_report
-from audit.llm.rule_check_generator import RuleCheck, generate_rule_checks
+from audit.llm.rule_check_generator import RuleCheck, dict_to_check, generate_rule_checks
 from audit.llm.rule_filter import filter_rules
 from audit.schemas.rule_schema import DraftRule
 
@@ -45,6 +46,8 @@ class PipelinePhase1Result:
     col_map:             dict
     supported_doc_names: list[str] = field(default_factory=list)
     warnings:            list[str] = field(default_factory=list)
+    reused_columns:      int = 0   # columns pre-filled from a Past Observations file
+    total_columns:       int = 0
 
 
 @dataclass
@@ -52,6 +55,7 @@ class PipelinePhase2Result:
     """Output of Phase 2 (step 3) — stored in session state for user rule review."""
     applicable_rules: list[DraftRule]
     dropped_rules:    dict[str, str]   # rule_id → reason
+    reused_rules:     int = 0          # rules pre-decided from a Past Observations file
 
 
 @dataclass
@@ -101,8 +105,13 @@ def run_pipeline_phase1(
     dataset_path:       str,
     supported_doc_names=None,
     on_progress:        Callable[[str], None] | None = None,
+    past_observations:  dict | None = None,
 ) -> PipelinePhase1Result:
-    """Steps 1-2 only. Returns phase1 result for user review of column meanings."""
+    """
+    Steps 1-2 only. Returns phase1 result for user review of column meanings.
+    past_observations: optional parsed Past Observations file (see audit.past_observations) —
+    columns it already covers are pre-filled, skipping the LLM call for those columns.
+    """
     warnings: list[str] = []
     supported_doc_names = supported_doc_names or []
 
@@ -129,7 +138,18 @@ def run_pipeline_phase1(
     log("Step 2/2 — Reading dataset + mapping columns...")
     headers, rows = read_excel_raw(dataset_path)
     log(f"  {len(rows):,} rows loaded, {len(headers)} columns")
-    col_map = map_columns(headers, rows)
+
+    reused_cols = 0
+    if past_observations:
+        reused_col_map, remaining_headers = po.split_columns(past_observations, headers)
+        reused_cols = len(reused_col_map)
+        new_col_map = map_columns(remaining_headers, rows) if remaining_headers else {}
+        col_map = {**reused_col_map, **new_col_map}
+        if reused_cols:
+            log(f"  {reused_cols}/{len(headers)} columns reused from past observations, "
+                f"{len(remaining_headers)} sent to AI")
+    else:
+        col_map = map_columns(headers, rows)
     log(f"  Column mapping complete — review and edit before proceeding")
 
     return PipelinePhase1Result(
@@ -139,23 +159,45 @@ def run_pipeline_phase1(
         col_map=col_map,
         supported_doc_names=supported_doc_names,
         warnings=warnings,
+        reused_columns=reused_cols,
+        total_columns=len(headers),
     )
 
 
 def run_pipeline_phase2(
-    phase1:      PipelinePhase1Result,
-    col_map:     dict,
-    on_progress: Callable[[str], None] | None = None,
+    phase1:            PipelinePhase1Result,
+    col_map:            dict,
+    on_progress:        Callable[[str], None] | None = None,
+    past_observations:  dict | None = None,
 ) -> PipelinePhase2Result:
-    """Step 3 only — filter rules. Returns phase2 result for user rule review."""
+    """
+    Step 3 only — filter rules. Returns phase2 result for user rule review.
+    past_observations: rules it already has an applicable/dropped decision for
+    (matched by rule_id + statement) skip the LLM filter call.
+    """
     def log(msg: str) -> None:
         if on_progress:
             on_progress(msg)
 
     log("Filtering rules applicable to this dataset...")
-    applicable_rules, dropped = filter_rules(phase1.all_rules, col_map)
+
+    reused_count = 0
+    if past_observations:
+        reused_app, reused_dropped, remaining_rules = po.split_rules(past_observations, phase1.all_rules)
+        new_applicable, new_dropped = filter_rules(remaining_rules, col_map) if remaining_rules else ([], {})
+        applicable_rules = reused_app + new_applicable
+        dropped          = {**reused_dropped, **new_dropped}
+        reused_count     = len(reused_app) + len(reused_dropped)
+        if reused_count:
+            log(f"  {reused_count}/{len(phase1.all_rules)} rules reused from past observations, "
+                f"{len(remaining_rules)} sent to AI for filtering")
+    else:
+        applicable_rules, dropped = filter_rules(phase1.all_rules, col_map)
+
     log(f"  {len(applicable_rules)} applicable, {len(dropped)} dropped — review before proceeding")
-    return PipelinePhase2Result(applicable_rules=applicable_rules, dropped_rules=dropped)
+    return PipelinePhase2Result(
+        applicable_rules=applicable_rules, dropped_rules=dropped, reused_rules=reused_count,
+    )
 
 
 @dataclass
@@ -165,16 +207,22 @@ class PipelinePhase3Result:
     dropped_rules:    dict[str, str]
     applicable_rules: list[DraftRule]
     audit_cols:       list[str]        # audit-relevant column names for UI selectors
+    reused_checks:    int = 0          # rule checks pre-filled from a Past Observations file
 
 
 def run_pipeline_phase3(
-    phase1:           PipelinePhase1Result,
-    col_map:          dict,
-    applicable_rules: list[DraftRule],
-    dropped_rules:    dict[str, str],
-    on_progress:      Callable[[str], None] | None = None,
+    phase1:            PipelinePhase1Result,
+    col_map:            dict,
+    applicable_rules:   list[DraftRule],
+    dropped_rules:      dict[str, str],
+    on_progress:        Callable[[str], None] | None = None,
+    past_observations:  dict | None = None,
 ) -> PipelinePhase3Result:
-    """Step 4 — generate + validate rule checks. Returns for user review."""
+    """
+    Step 4 — generate + validate rule checks. Returns for user review.
+    past_observations: rules it already has a computation spec for (matched by
+    rule_id) skip the LLM rule-check-generation call.
+    """
     headers = phase1.headers
 
     def log(msg: str) -> None:
@@ -187,10 +235,28 @@ def run_pipeline_phase3(
     audit_cols    = [h for h in headers if h in audit_set]
 
     log("Generating Rule Checks (batched LLM calls)...")
-    rule_checks = generate_rule_checks(
-        applicable_rules, audit_col_map,
-        supported_doc_names=phase1.supported_doc_names,
-    )
+    reused_count = 0
+    if past_observations:
+        reused_dicts, remaining_rules = po.split_rule_checks(past_observations, applicable_rules)
+        rule_index    = {r.rule_id: r for r in applicable_rules}
+        reused_checks = [
+            dict_to_check(d, rule_index[d["rule_id"]])
+            for d in reused_dicts if d.get("rule_id") in rule_index
+        ]
+        reused_count  = len(reused_checks)
+        new_checks    = (
+            generate_rule_checks(remaining_rules, audit_col_map, supported_doc_names=phase1.supported_doc_names)
+            if remaining_rules else []
+        )
+        rule_checks = reused_checks + new_checks
+        if reused_count:
+            log(f"  {reused_count}/{len(applicable_rules)} rule checks reused from past observations, "
+                f"{len(remaining_rules)} generated by AI")
+    else:
+        rule_checks = generate_rule_checks(
+            applicable_rules, audit_col_map,
+            supported_doc_names=phase1.supported_doc_names,
+        )
 
     valid_checks: list[RuleCheck] = []
     for check in rule_checks:
@@ -234,6 +300,7 @@ def run_pipeline_phase3(
         dropped_rules=dropped_rules,
         applicable_rules=applicable_rules,
         audit_cols=audit_cols,
+        reused_checks=reused_count,
     )
 
 

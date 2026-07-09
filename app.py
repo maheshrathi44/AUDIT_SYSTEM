@@ -1,12 +1,17 @@
 """AI Audit System — Streamlit frontend (full-dataset v2 pipeline)"""
 
 import base64
+import html
 import os
+import re
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+
+from audit import past_observations as po
 
 _ASSETS = Path(__file__).parent / "assets"
 
@@ -78,6 +83,10 @@ for k, v in [
     # multi-dataset queue — one procedure set + docs, many datasets, one report each
     ("proc_files_cache", None), ("doc_names_cache", None),
     ("dataset_queue", None), ("dataset_results", None), ("current_ds_name", None),
+    # cross-dataset reuse within one run — schema (sorted column set) → confirmed decisions
+    ("schema_cache", None), ("dataset_reuse_notes", None),
+    # Past Observations uploaded on page 1 — parsed dict, reused across the whole run
+    ("past_observations_cache", None),
 ]:
     if k not in st.session_state:
         st.session_state[k] = v
@@ -85,16 +94,19 @@ for k, v in [
 
 def _reset_multi_dataset_state() -> None:
     """Full reset — used by 'New Audit' and any 'back to upload' action."""
-    st.session_state.phase1           = None
-    st.session_state.phase2           = None
-    st.session_state.phase3           = None
-    st.session_state.audit_col_map    = None
-    st.session_state.results          = None
-    st.session_state.proc_files_cache = None
-    st.session_state.doc_names_cache  = None
-    st.session_state.dataset_queue    = None
-    st.session_state.dataset_results  = None
-    st.session_state.current_ds_name  = None
+    st.session_state.phase1              = None
+    st.session_state.phase2              = None
+    st.session_state.phase3              = None
+    st.session_state.audit_col_map       = None
+    st.session_state.results             = None
+    st.session_state.proc_files_cache    = None
+    st.session_state.doc_names_cache     = None
+    st.session_state.dataset_queue       = None
+    st.session_state.dataset_results     = None
+    st.session_state.current_ds_name     = None
+    st.session_state.schema_cache            = None
+    st.session_state.dataset_reuse_notes     = None
+    st.session_state.past_observations_cache = None
 
 
 # ── Theme ──────────────────────────────────────────────────────────────────────
@@ -361,6 +373,121 @@ def _prio_badge(priority: str) -> str:
     return f'<span class="badge {cls}">{priority.title()}</span>'
 
 
+def _safe_filename(name: str) -> str:
+    """Strip extension + replace anything non-alnum so it's safe as a download filename."""
+    stem = Path(name).stem
+    return re.sub(r"[^A-Za-z0-9_-]+", "_", stem).strip("_") or "dataset"
+
+
+def _build_report_html(results, ds_name: str) -> str:
+    """Standalone, shareable HTML snapshot of one dataset's audit report."""
+    report = results.report
+    esc = html.escape
+
+    verdict_color = {"Pass": "#22c55e", "Fail": "#ef4444", "Partial": "#f59e0b", "Missing": "#94a3b8"}
+    risk_color    = {"High": "#ef4444", "Medium": "#f59e0b", "Low": "#22c55e"}
+
+    def badge(text: str, color: str) -> str:
+        return f'<span class="badge" style="background:{color}20;color:{color}">{esc(text)}</span>'
+
+    def example_table(rows: list[dict]) -> str:
+        if not rows:
+            return ""
+        cols = list(rows[0].keys())
+        head = "".join(f"<th>{esc(c)}</th>" for c in cols)
+        body = "".join(
+            "<tr>" + "".join(f"<td>{esc(r.get(c, ''))}</td>" for c in cols) + "</tr>"
+            for r in rows
+        )
+        return f'<table class="ex-table"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>'
+
+    kpis = [
+        ("Total Rows",       f"{results.total_rows:,}"),
+        ("Rules Audited",    str(report.total_rules_audited)),
+        ("Passed",           str(len(report.passed_rules))),
+        ("Failed / Partial", f"{len(report.failed_rules)} / {len(report.partial_rules)}"),
+        ("Non-Compliance",   f"{_nc_pct(report.overall_compliance_pct)}%"),
+        ("Overall Risk",     report.overall_risk),
+    ]
+    kpi_html = "".join(
+        f'<div class="kpi"><div class="kpi-val">{esc(v)}</div><div class="kpi-lbl">{esc(l)}</div></div>'
+        for l, v in kpis
+    )
+    risk_areas_html = "".join(f"<li>{esc(a)}</li>" for a in report.risk_areas)
+    overall_color = risk_color.get(report.overall_risk, "#94a3b8")
+
+    cards_html = ""
+    for v in results.verdicts:
+        vc = verdict_color.get(v.verdict, "#94a3b8")
+        rc = risk_color.get(v.risk, "#94a3b8")
+        details = ""
+        if v.fail_examples:
+            details += f'<details><summary>Sample failures ({len(v.fail_examples)})</summary>{example_table(v.fail_examples)}</details>'
+        if v.pass_examples:
+            details += f'<details><summary>Sample passes ({len(v.pass_examples)})</summary>{example_table(v.pass_examples)}</details>'
+        if v.miss_examples:
+            details += f'<details><summary>Sample missing ({len(v.miss_examples)})</summary>{example_table(v.miss_examples)}</details>'
+
+        cards_html += (
+            f'<div class="vcard" style="border-left-color:{vc}">'
+            f'<div class="vcard-hdr">'
+            f'<span class="rid">{esc(v.rule_id)}</span>'
+            f'<span class="check-type">{esc(v.check_type)}</span>'
+            f'<span style="margin-left:auto">{badge(v.verdict, vc)} {badge(v.risk + " Risk", rc)}</span>'
+            f'</div>'
+            f'<div class="stmt">{esc(v.rule_statement)}</div>'
+            f'<div class="cbar-wrap"><div class="cbar" style="width:{v.compliance_pct}%;background:{vc}"></div></div>'
+            f'<div class="finding">{esc(v.finding)}</div>'
+            f'<div class="stats">'
+            f'<span><b style="color:#22c55e">{v.pass_count:,}</b> pass</span>'
+            f'<span><b style="color:#ef4444">{v.fail_count:,}</b> fail</span>'
+            f'<span><b style="color:#94a3b8">{v.missing_count:,}</b> missing</span>'
+            f'<span><b>{v.total_rows:,}</b> total</span>'
+            f'</div>'
+            f'{details}'
+            f'</div>'
+        )
+
+    generated = datetime.now().strftime("%Y-%m-%d %H:%M")
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>Audit Report — {esc(ds_name)}</title>
+<style>
+body {{ font-family: -apple-system, 'Segoe UI', sans-serif; background:#f0f2f8; color:#111827; margin:0; padding:32px; }}
+h1 {{ font-size:20px; margin-bottom:2px; }}
+.sub {{ color:#6b7280; font-size:13px; margin-bottom:20px; }}
+.kpi-grid {{ display:flex; gap:10px; flex-wrap:wrap; margin-bottom:20px; }}
+.kpi {{ flex:1; min-width:120px; background:#fff; border:1px solid #dde2f0; border-radius:10px; padding:14px 16px; text-align:center; }}
+.kpi-val {{ font-size:22px; font-weight:700; color:#4b5cf6; }}
+.kpi-lbl {{ font-size:10px; color:#6b7280; text-transform:uppercase; letter-spacing:.5px; margin-top:4px; }}
+.summary {{ background:#fff; border:1px solid #dde2f0; border-left:4px solid {overall_color}; border-radius:10px; padding:16px 20px; margin-bottom:24px; font-size:13.5px; line-height:1.6; }}
+.summary ul {{ margin:8px 0 0; padding-left:18px; }}
+.badge {{ display:inline-block; padding:2px 10px; border-radius:20px; font-size:11px; font-weight:600; margin-right:4px; }}
+.vcard {{ background:#fff; border:1px solid #dde2f0; border-left:4px solid #ccc; border-radius:10px; padding:16px 20px; margin-bottom:12px; }}
+.vcard-hdr {{ display:flex; align-items:center; gap:8px; margin-bottom:8px; }}
+.rid {{ font-weight:700; color:#4b5cf6; font-family:monospace; }}
+.check-type {{ font-size:10px; text-transform:uppercase; border:1px solid #dde2f0; border-radius:20px; padding:2px 7px; color:#6b7280; }}
+.stmt {{ font-size:13px; margin-bottom:8px; }}
+.cbar-wrap {{ background:#e5e7eb; border-radius:99px; height:5px; overflow:hidden; margin-bottom:8px; }}
+.cbar {{ height:100%; }}
+.finding {{ font-size:12px; color:#6b7280; margin-bottom:10px; }}
+.stats span {{ margin-right:20px; font-size:12px; color:#6b7280; }}
+.ex-table {{ width:100%; border-collapse:collapse; font-size:11.5px; margin-top:8px; }}
+.ex-table th, .ex-table td {{ border-bottom:1px solid #eee; padding:4px 8px; text-align:left; }}
+details summary {{ cursor:pointer; font-size:12px; color:#4b5cf6; margin-top:8px; }}
+</style>
+</head><body>
+<h1>AI Compliance Audit Report</h1>
+<div class="sub">Dataset: {esc(ds_name)} &nbsp;&middot;&nbsp; {results.total_rows:,} rows &nbsp;&middot;&nbsp; Generated {esc(generated)}</div>
+<div class="kpi-grid">{kpi_html}</div>
+<div class="summary">
+  {badge(report.overall_risk + " Risk", overall_color)}
+  <div style="margin-top:8px">{esc(report.summary)}</div>
+  <ul>{risk_areas_html}</ul>
+</div>
+{cards_html}
+</body></html>"""
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE 1 — Upload
 # ══════════════════════════════════════════════════════════════════════════════
@@ -427,7 +554,7 @@ def page_upload() -> None:
         unsafe_allow_html=True,
     )
 
-    c_proc, c_data = st.columns(2, gap="medium")
+    c_proc, c_data, c_past = st.columns(3, gap="medium")
 
     with c_proc:
         st.markdown(
@@ -486,12 +613,46 @@ def page_upload() -> None:
             )
 
         if dataset_files or supp_files:
-            html = ""
+            pills_html = ""
             if dataset_files:
-                html += _pill_row(f"📊 Recognised as datasets ({len(dataset_files)}) — one report per file:", dataset_files)
+                pills_html += _pill_row(f"📊 Recognised as datasets ({len(dataset_files)}) — one report per file:", dataset_files)
             if supp_files:
-                html += _pill_row(f"📎 Recognised as reference documents ({len(supp_files)}):", supp_files)
-            st.markdown(html, unsafe_allow_html=True)
+                pills_html += _pill_row(f"📎 Recognised as reference documents ({len(supp_files)}):", supp_files)
+            st.markdown(pills_html, unsafe_allow_html=True)
+
+    past_observations = None
+    with c_past:
+        st.markdown(
+            f'<div class="upload-card-hdr" style="border-top-color:{t["muted"]}">'
+            f'<div class="upload-card-icon">🗂️</div>'
+            f'<div class="upload-card-title">Past Observations <span style="font-size:10px;'
+            f'font-weight:400;color:{t["muted"]}">Optional</span></div>'
+            f'<div class="upload-card-sub">Downloaded from a previous audit\'s Results page. '
+            f'Columns and rules it already covers are pre-filled automatically — only new ones '
+            f'are sent to the AI. Leave empty for a fresh audit.</div>'
+            f'<div style="margin-top:8px;font-size:10.5px;color:{t["muted"]}">'
+            f'JSON only — must be a file this app generated</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        past_obs_file = st.file_uploader(
+            "past_observations",
+            type=["json"],
+            accept_multiple_files=False,
+            label_visibility="collapsed",
+        )
+        if past_obs_file is not None:
+            parsed = po.load(past_obs_file.getvalue())
+            if parsed is None:
+                st.error("Not a valid Past Observations file — it will be ignored.")
+            else:
+                past_observations = parsed
+                n_cols  = len(parsed.get("columns", []))
+                n_rules = len(parsed.get("applicable_rules", [])) + len(parsed.get("dropped_rules", {}))
+                src     = parsed.get("source_dataset_name", "?")
+                st.caption(
+                    f"✓ Loaded — {n_cols} columns, {n_rules} rule decisions from **{src}**."
+                )
 
     st.markdown("<br>", unsafe_allow_html=True)
     ready = bool(proc_files and dataset_files)
@@ -505,18 +666,21 @@ def page_upload() -> None:
 
     if st.button("Run Audit  →", type="primary", disabled=not ready):
         doc_names = [f.name for f in supp_files] if supp_files else []
-        _start_multi_dataset_run(proc_files, dataset_files, doc_names)
+        _start_multi_dataset_run(proc_files, dataset_files, doc_names, past_observations)
 
 
-def _start_multi_dataset_run(proc_files, dataset_files, doc_names=None) -> None:
+def _start_multi_dataset_run(proc_files, dataset_files, doc_names=None, past_observations=None) -> None:
     """
     Seeds the multi-dataset queue and kicks off phase1 for the first dataset.
     Procedure files + doc names are cached as raw bytes so they survive reruns
     while the remaining datasets in the queue are processed one by one.
     """
-    st.session_state.proc_files_cache = [(f.name, f.getvalue()) for f in proc_files]
-    st.session_state.doc_names_cache  = doc_names or []
-    st.session_state.dataset_results  = {}
+    st.session_state.proc_files_cache        = [(f.name, f.getvalue()) for f in proc_files]
+    st.session_state.doc_names_cache         = doc_names or []
+    st.session_state.dataset_results         = {}
+    st.session_state.schema_cache            = {}
+    st.session_state.dataset_reuse_notes     = {}
+    st.session_state.past_observations_cache = past_observations
     queue = [(f.name, f.getvalue()) for f in dataset_files]
     first_name, first_bytes = queue.pop(0)
     st.session_state.dataset_queue = queue
@@ -556,6 +720,7 @@ def _run_pipeline_phase1(ds_name: str, ds_bytes: bytes) -> None:
                 proc_paths, ds_path,
                 supported_doc_names=st.session_state.doc_names_cache or [],
                 on_progress=log,
+                past_observations=st.session_state.past_observations_cache,
             )
         except Exception as e:
             status.empty()
@@ -567,7 +732,22 @@ def _run_pipeline_phase1(ds_name: str, ds_bytes: bytes) -> None:
     status.empty()
     progress.empty()
     st.session_state.phase1 = phase1
-    st.session_state.page   = "col_review"
+
+    # ── Cross-dataset reuse — same column schema as an already-processed dataset? ──
+    # Skips column mapping / rule filtering / rule check review entirely: no LLM
+    # calls and no repeat manual review for a dataset that looks like one we've
+    # already confirmed decisions for in this run.
+    schema_key = tuple(sorted(phase1.headers))
+    cached = (st.session_state.schema_cache or {}).get(schema_key)
+    if cached:
+        st.session_state.dataset_reuse_notes[ds_name] = cached["source_name"]
+        _run_pipeline_phase4(
+            phase1, cached["col_map"], cached["rule_checks"],
+            cached["applicable_rules"], dict(cached["dropped_rules"]),
+        )
+        return
+
+    st.session_state.page = "col_review"
     st.rerun()
 
 
@@ -594,7 +774,10 @@ def _run_pipeline_phase2(phase1, col_map: dict) -> None:
 
     try:
         from audit.pipeline_v2 import run_pipeline_phase2
-        phase2 = run_pipeline_phase2(phase1, col_map, on_progress=log)
+        phase2 = run_pipeline_phase2(
+            phase1, col_map, on_progress=log,
+            past_observations=st.session_state.past_observations_cache,
+        )
     except Exception as e:
         status.empty()
         progress.empty()
@@ -627,6 +810,7 @@ def _run_pipeline_phase3(phase1, col_map: dict, applicable_rules, dropped_rules:
         phase3 = run_pipeline_phase3(
             phase1, col_map, applicable_rules, dropped_rules,
             on_progress=log,
+            past_observations=st.session_state.past_observations_cache,
         )
     except Exception as e:
         status.empty()
@@ -671,7 +855,21 @@ def _run_pipeline_phase4(phase1, col_map: dict, rule_checks, applicable_rules, d
     status.empty()
     progress.empty()
 
-    st.session_state.dataset_results[st.session_state.current_ds_name] = results
+    ds_name = st.session_state.current_ds_name
+    st.session_state.dataset_results[ds_name] = results
+
+    # Cache this dataset's confirmed decisions so a later same-schema dataset in
+    # this run can reuse them without another LLM call or manual review pass.
+    schema_key = tuple(sorted(results.col_map.keys()))
+    if schema_key not in (st.session_state.schema_cache or {}):
+        st.session_state.schema_cache[schema_key] = {
+            "source_name":      ds_name,
+            "col_map":          results.col_map,
+            "applicable_rules": results.applicable_rules,
+            "dropped_rules":    results.dropped_rules,
+            "rule_checks":      results.rule_checks,
+        }
+
     st.session_state.phase1        = None
     st.session_state.phase2        = None
     st.session_state.phase3        = None
@@ -710,6 +908,12 @@ def page_col_review() -> None:
 
     n_total    = len(phase1.headers)
     n_relevant = sum(1 for h in phase1.headers if phase1.col_map.get(h, {}).get("audit_relevant"))
+
+    if getattr(phase1, "reused_columns", 0):
+        st.info(
+            f"{phase1.reused_columns}/{phase1.total_columns} columns pre-filled from your "
+            f"uploaded Past Observations file — only the rest were sent to the AI."
+        )
 
     st.markdown(
         f'<div style="background:{t["surface"]};border:1px solid {t["border"]};'
@@ -833,6 +1037,12 @@ def page_rule_review() -> None:
     _header("Rule Review",
             "Step 3 of 4 — Review, edit and move rules freely before running the audit"
             + _dataset_progress_label())
+
+    if getattr(phase2, "reused_rules", 0):
+        st.info(
+            f"{phase2.reused_rules}/{len(phase1.all_rules)} rule decisions pre-filled from your "
+            f"uploaded Past Observations file — only the rest were sent to the AI for filtering."
+        )
 
     st.markdown(
         f'<div style="background:{t["surface"]};border:1px solid {t["border"]};'
@@ -1082,6 +1292,12 @@ def page_rule_check_review() -> None:
     f_count = sum(1 for c in phase3.rule_checks if c.check_type == "formula")
     j_count = sum(1 for c in phase3.rule_checks if c.check_type == "judgment")
 
+    if getattr(phase3, "reused_checks", 0):
+        st.info(
+            f"{phase3.reused_checks}/{len(phase3.rule_checks)} rule checks pre-filled from your "
+            f"uploaded Past Observations file — only the rest were generated by the AI."
+        )
+
     st.markdown(
         f'<div style="background:{t["surface"]};border:1px solid {t["border"]};'
         f'border-left:4px solid {t["accent"]};border-radius:10px;'
@@ -1302,6 +1518,33 @@ def _render_dataset_results(results, ds_name: str, show_name: bool = False) -> N
         st.markdown(
             f'<div class="slbl" style="margin-bottom:10px">Report for: {ds_name}</div>',
             unsafe_allow_html=True,
+        )
+
+    reused_from = (st.session_state.dataset_reuse_notes or {}).get(ds_name)
+    if reused_from:
+        st.info(
+            f"Column mapping, rule filtering, and rule checks were reused from "
+            f"**{reused_from}** (identical column schema) — no extra AI calls were made for this dataset."
+        )
+
+    dl1, dl2, _ = st.columns([2, 2, 3])
+    with dl1:
+        st.download_button(
+            "⬇ Download Report (.html)",
+            data=_build_report_html(results, ds_name),
+            file_name=f"audit_report_{_safe_filename(ds_name)}.html",
+            mime="text/html",
+            use_container_width=True,
+        )
+    with dl2:
+        st.download_button(
+            "⬇ Download Past Observations (.json)",
+            data=po.dumps(results, ds_name),
+            file_name=f"past_observations_{_safe_filename(ds_name)}.json",
+            mime="application/json",
+            use_container_width=True,
+            help="Save this to skip column mapping, rule filtering, and rule check "
+                 "review next time you audit a dataset with the same columns.",
         )
 
     _OCR_NOISE = ("ocr", "scanned pdf", "very little text", "text extracted")

@@ -6,8 +6,10 @@ Supported:
 - DOCX
 - TXT / MD
 
+
 PDF flow:
 1. Try normal text extraction using PyMuPDF.
+
 2. If very little text is extracted, assume scanned PDF.
 3. Fall back to OCR using pdf2image + Tesseract.
 """

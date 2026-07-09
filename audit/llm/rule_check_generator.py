@@ -201,13 +201,14 @@ def generate_rule_checks(
 
     print(f"    ({len(all_dicts)} rule checks generated)")
     return [
-        _dict_to_check(c, rule_index[c["rule_id"]])
+        dict_to_check(c, rule_index[c["rule_id"]])
         for c in all_dicts
         if c.get("rule_id") in rule_index
     ]
 
 
-def _dict_to_check(c: dict, rule: DraftRule) -> RuleCheck:
+def dict_to_check(c: dict, rule: DraftRule) -> RuleCheck:
+    """Public — also used to rebuild a RuleCheck from a saved Past Observations entry."""
     return RuleCheck(
         rule_id=c.get("rule_id", ""),
         rule=rule,
