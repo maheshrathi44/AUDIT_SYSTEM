@@ -216,6 +216,7 @@ def dict_to_check(c: dict, rule: DraftRule) -> RuleCheck:
         description=c.get("description", ""),
         filter_column=c.get("filter_column") or "",
         filter_value=c.get("filter_value") or "",
+        filter_conditions=c.get("filter_conditions") or [],
         column_a=c.get("column_a") or "",
         column_b=c.get("column_b") or "",
         computation=c.get("computation") or "",

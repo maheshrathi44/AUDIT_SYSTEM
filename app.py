@@ -277,8 +277,8 @@ div[data-testid="stDataFrame"] {{
     color: {t['accent']} !important; font-weight: 600;
     border-bottom: 2px solid {t['accent']} !important;
 }}
-/* number inputs / text inputs */
-.stNumberInput input, .stTextInput input {{
+/* number inputs / text inputs / text areas */
+.stNumberInput input, .stTextInput input, .stTextArea textarea {{
     background: {t['surface']} !important; color: {t['text']} !important;
     border: 1px solid {t['border']} !important; border-radius: 8px !important;
 }}
@@ -965,8 +965,7 @@ def page_col_review() -> None:
             "Step 2 of 3 — Verify AI-generated column meanings before running the audit"
             + _dataset_progress_label())
 
-    n_total    = len(phase1.headers)
-    n_relevant = sum(1 for h in phase1.headers if phase1.col_map.get(h, {}).get("audit_relevant"))
+    n_total = len(phase1.headers)
 
     if getattr(phase1, "reused_columns", 0):
         st.info(
@@ -978,23 +977,33 @@ def page_col_review() -> None:
         f'<div style="background:{t["surface"]};border:1px solid {t["border"]};'
         f'border-left:4px solid {t["accent"]};border-radius:10px;'
         f'padding:14px 18px;margin-bottom:18px;font-size:13px;color:{t["text"]};line-height:1.6">'
-        f'The AI has mapped <b>{n_total}</b> columns and marked <b>{n_relevant}</b> as audit-relevant. '
-        f'Review each row below — correct meanings, adjust roles, and uncheck <b>Include in Audit</b> '
-        f'for columns that should not be used in compliance checks. '
+        f'The AI has mapped <b>{n_total}</b> columns. All columns are <b>included in the audit by '
+        f'default</b> — review each row below, correct meanings/roles, and uncheck '
+        f'<b>Include in Audit</b> for any column that should not be used in compliance checks. '
         f'<span style="color:{t["muted"]}">Changes here directly affect which rules run and how columns are matched.</span>'
         f'</div>',
         unsafe_allow_html=True,
     )
 
+    reused_cols = getattr(phase1, "reused_column_names", set()) or set()
+
     rows = []
     for col in phase1.headers:
         info = phase1.col_map.get(col, {})
+        if col in reused_cols:
+            # This column's mapping came from a Past Observations file — that's a human's
+            # own prior decision (including deliberately excluding a column), so honor it.
+            include = bool(info.get("audit_relevant", True))
+        else:
+            # Freshly AI-mapped column — never let the AI's own relevance guess silently
+            # exclude it; only the user unchecking the box here should exclude a column.
+            include = True
         rows.append({
             "Column":           col,
             "Meaning":          info.get("meaning", ""),
             "Semantic Role":    info.get("semantic_role", "other"),
             "Data Type":        info.get("data_type", "text"),
-            "Include in Audit": True,
+            "Include in Audit": include,
         })
 
     edited_df = st.data_editor(
@@ -1002,14 +1011,16 @@ def page_col_review() -> None:
         column_config={
             "Column":           st.column_config.TextColumn("Column", disabled=True, width="medium"),
             "Meaning":          st.column_config.TextColumn("Meaning (edit if wrong)", width="large"),
-            "Semantic Role":    st.column_config.SelectboxColumn("Semantic Role", options=_COL_ROLES, width="medium"),
+            "Semantic Role":    st.column_config.SelectboxColumn("Semantic Role", options=_COL_ROLES, width="small"),
             "Data Type":        st.column_config.SelectboxColumn("Data Type", options=_COL_TYPES, width="small"),
             "Include in Audit": st.column_config.CheckboxColumn("Include in Audit", width="small"),
         },
         use_container_width=True,
         hide_index=True,
         num_rows="fixed",
-        key="col_editor",
+        # Keyed by this dataset's phase1 identity — a stale editor cache from a
+        # PREVIOUS dataset in the queue must not bleed into this one's columns.
+        key=f"col_editor_{id(phase1)}",
     )
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -1254,7 +1265,13 @@ def _render_filter_ui(rid: str, check, col_opts: list, phase1) -> None:
     fcver_key = f"rc_{rid}_fcv"
 
     if fcond_key not in st.session_state:
-        if check.filter_column and check.filter_column in col_opts:
+        if check.filter_conditions:
+            st.session_state[fcond_key] = [
+                {"col": fc.get("column", ""), "val": fc.get("value", "")}
+                for fc in check.filter_conditions
+                if fc.get("column") in col_opts
+            ]
+        elif check.filter_column and check.filter_column in col_opts:
             st.session_state[fcond_key] = [{"col": check.filter_column, "val": check.filter_value or ""}]
         else:
             st.session_state[fcond_key] = []
@@ -1340,6 +1357,17 @@ def page_rule_check_review() -> None:
     phase3 = st.session_state.phase3
     col_map = st.session_state.audit_col_map or phase1.col_map
 
+    # Every widget below is keyed by rule_id, and rule_ids repeat across datasets that
+    # share the same procedure (same procedure file → same rule_id sequence every time).
+    # Without this reset, Streamlit would silently keep showing a PREVIOUS dataset's
+    # (or a stale prior run's) widget values instead of this phase3's actual checks —
+    # including reused-from-Past-Observations values.
+    if st.session_state.get("rc_phase3_id") != id(phase3):
+        for k in list(st.session_state.keys()):
+            if k.startswith("rc_"):
+                del st.session_state[k]
+        st.session_state.rc_phase3_id = id(phase3)
+
     audit_cols = phase3.audit_cols   # ordered list of kept columns
     _NONE      = "(none)"
     col_opts   = [_NONE] + audit_cols
@@ -1397,8 +1425,9 @@ def page_rule_check_review() -> None:
         )
         with st.expander(exp_label):
             st.markdown(
-                f'<div style="font-size:12.5px;color:{t["muted"]};'
-                f'margin-bottom:10px;line-height:1.5">{check.rule.statement}</div>',
+                f'<div style="background:{t["surface"]};border:1px solid {t["border"]};'
+                f'border-radius:8px;padding:10px 14px;margin-bottom:12px;'
+                f'font-size:12.5px;color:{t["text"]};line-height:1.5">{check.rule.statement}</div>',
                 unsafe_allow_html=True,
             )
 

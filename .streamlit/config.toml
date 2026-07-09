@@ -4,6 +4,3 @@ primaryColor = "#4b5cf6"
 backgroundColor = "#f0f2f8"
 secondaryBackgroundColor = "#ffffff"
 textColor = "#111827"
-
-[server]
-headless = true

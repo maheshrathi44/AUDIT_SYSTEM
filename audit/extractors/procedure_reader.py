@@ -7,6 +7,7 @@ Supported:
 - TXT / MD
 
 
+
 PDF flow:
 1. Try normal text extraction using PyMuPDF.
 

@@ -48,6 +48,7 @@ class PipelinePhase1Result:
     warnings:            list[str] = field(default_factory=list)
     reused_columns:      int = 0   # columns pre-filled from a Past Observations file
     total_columns:       int = 0
+    reused_column_names: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -85,11 +86,17 @@ def _find_case_col(headers: list[str], col_map: dict) -> str | None:
     First checks semantic_role == "case_id"; if not found, checks meaning text for
     keywords like "primary key", "unique identifier", etc.
     """
-    # Pass 1: explicit semantic role
-    for h in headers:
-        info = col_map.get(h, {})
-        if info.get("audit_relevant") and info.get("semantic_role") == "case_id":
-            return h
+    # Pass 1: explicit semantic role — a dataset can have more than one equally-unique
+    # reference number (e.g. "SBPR No." alongside "FTIR No."). Prefer the one this
+    # audit is actually about (its name contains "ftir") over any other case_id column,
+    # instead of just taking whichever happens to appear first in the sheet.
+    candidates = [
+        h for h in headers
+        if col_map.get(h, {}).get("audit_relevant") and col_map.get(h, {}).get("semantic_role") == "case_id"
+    ]
+    if candidates:
+        ftir_candidates = [h for h in candidates if "ftir" in h.lower()]
+        return ftir_candidates[0] if ftir_candidates else candidates[0]
     # Pass 2: user described it as primary key / unique identifier in meaning
     for h in headers:
         info = col_map.get(h, {})
@@ -140,9 +147,11 @@ def run_pipeline_phase1(
     log(f"  {len(rows):,} rows loaded, {len(headers)} columns")
 
     reused_cols = 0
+    reused_col_names: set[str] = set()
     if past_observations:
         reused_col_map, remaining_headers = po.split_columns(past_observations, headers)
-        reused_cols = len(reused_col_map)
+        reused_cols      = len(reused_col_map)
+        reused_col_names = set(reused_col_map.keys())
         new_col_map = map_columns(remaining_headers, rows) if remaining_headers else {}
         col_map = {**reused_col_map, **new_col_map}
         if reused_cols:
@@ -161,6 +170,7 @@ def run_pipeline_phase1(
         warnings=warnings,
         reused_columns=reused_cols,
         total_columns=len(headers),
+        reused_column_names=reused_col_names,
     )
 
 
