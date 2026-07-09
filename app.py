@@ -282,8 +282,67 @@ div[data-testid="stDataFrame"] {{
     background: {t['surface']} !important; color: {t['text']} !important;
     border: 1px solid {t['border']} !important; border-radius: 8px !important;
 }}
-/* info/warning/error boxes */
-[data-testid="stAlert"] {{ border-radius: 8px; }}
+/* info/warning/error boxes — Streamlit's own theme doesn't always match ours, force it */
+[data-testid="stAlert"] {{
+    background: {t['surface']} !important;
+    border: 1px solid {t['border']} !important;
+    border-radius: 8px !important;
+}}
+[data-testid="stAlert"] * {{ color: {t['text']} !important; fill: {t['text']} !important; }}
+
+/* download buttons — not covered by .stButton, style to match secondary buttons */
+[data-testid="stDownloadButton"] button {{
+    background: {t['surface']} !important;
+    border: 1px solid {t['border']} !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+}}
+[data-testid="stDownloadButton"] button * {{ color: {t['text']} !important; }}
+[data-testid="stDownloadButton"] button:hover {{ border-color: {t['accent']} !important; }}
+[data-testid="stDownloadButton"] button:hover * {{ color: {t['accent']} !important; }}
+
+/* captions */
+[data-testid="stCaptionContainer"] * {{ color: {t['muted']} !important; }}
+
+/* widget labels (radio / checkbox / selectbox / multiselect / text input titles) */
+[data-testid="stWidgetLabel"] p {{ color: {t['text']} !important; }}
+
+/* selectbox / multiselect input box (BaseWeb) */
+div[data-baseweb="select"] > div {{
+    background: {t['surface']} !important;
+    border-color: {t['border']} !important;
+}}
+div[data-baseweb="select"] * {{ color: {t['text']} !important; fill: {t['text']} !important; }}
+div[data-baseweb="tag"] {{
+    background: {t['accent']} !important; border-color: {t['accent']} !important;
+}}
+div[data-baseweb="tag"] * {{ color: #fff !important; }}
+
+/* dropdown menus / help tooltips — rendered in a portal, need unscoped rules */
+div[data-baseweb="popover"] {{ background: transparent; }}
+div[data-baseweb="popover"] ul, div[data-baseweb="menu"] {{
+    background: {t['surface']} !important;
+    border: 1px solid {t['border']} !important;
+}}
+div[data-baseweb="popover"] li, div[data-baseweb="popover"] li * {{
+    color: {t['text']} !important; background: transparent !important;
+}}
+div[data-baseweb="popover"] li:hover {{ background: {t['bg']} !important; }}
+div[data-baseweb="tooltip"] {{
+    background: {t['surface']} !important;
+    border: 1px solid {t['border']} !important;
+    border-radius: 6px !important;
+}}
+div[data-baseweb="tooltip"] * {{ color: {t['text']} !important; }}
+
+/* radio / checkbox option labels */
+[data-testid="stRadio"] label span, [data-testid="stCheckbox"] label span {{
+    color: {t['text']} !important;
+}}
+
+/* help "?" icon next to widget labels */
+[data-testid="stTooltipIcon"] {{ color: {t['muted']} !important; }}
+[data-testid="stTooltipIcon"] svg {{ fill: {t['muted']} !important; }}
 
 /* ── MSIL Upload Cards ── */
 .upload-card-hdr {{
