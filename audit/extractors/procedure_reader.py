@@ -111,6 +111,7 @@ def _read_docx(file_path: Path) -> tuple[str, list[str]]:
         for paragraph in document.paragraphs
     ).strip()
 
+
     return text, []
 
 

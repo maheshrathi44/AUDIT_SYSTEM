@@ -75,9 +75,26 @@ st.set_page_config(
 for k, v in [
     ("page", "upload"), ("results", None), ("dark", False),
     ("phase1", None), ("phase2", None), ("phase3", None), ("audit_col_map", None),
+    # multi-dataset queue — one procedure set + docs, many datasets, one report each
+    ("proc_files_cache", None), ("doc_names_cache", None),
+    ("dataset_queue", None), ("dataset_results", None), ("current_ds_name", None),
 ]:
     if k not in st.session_state:
         st.session_state[k] = v
+
+
+def _reset_multi_dataset_state() -> None:
+    """Full reset — used by 'New Audit' and any 'back to upload' action."""
+    st.session_state.phase1           = None
+    st.session_state.phase2           = None
+    st.session_state.phase3           = None
+    st.session_state.audit_col_map    = None
+    st.session_state.results          = None
+    st.session_state.proc_files_cache = None
+    st.session_state.doc_names_cache  = None
+    st.session_state.dataset_queue    = None
+    st.session_state.dataset_results  = None
+    st.session_state.current_ds_name  = None
 
 
 # ── Theme ──────────────────────────────────────────────────────────────────────
@@ -410,7 +427,7 @@ def page_upload() -> None:
         unsafe_allow_html=True,
     )
 
-    c_proc, c_data, c_supp = st.columns(3, gap="medium")
+    c_proc, c_data = st.columns(2, gap="medium")
 
     with c_proc:
         st.markdown(
@@ -418,7 +435,8 @@ def page_upload() -> None:
             f'<div class="upload-card-icon">📋</div>'
             f'<div class="upload-card-title">Procedure Documents</div>'
             f'<div class="upload-card-sub">Standard operating procedures, work instructions, '
-            f'quality manuals — any document containing auditable rules.</div>'
+            f'quality manuals — any document containing auditable rules. '
+            f'Rules extracted here apply to every dataset uploaded on the right.</div>'
             f'<div style="margin-top:8px;font-size:10.5px;color:{t["muted"]}">'
             f'PDF · DOCX · TXT · MD</div>'
             f'</div>',
@@ -435,69 +453,79 @@ def page_upload() -> None:
         st.markdown(
             f'<div class="upload-card-hdr" style="border-top-color:{t["accent"]}">'
             f'<div class="upload-card-icon">📊</div>'
-            f'<div class="upload-card-title">Audit Dataset</div>'
-            f'<div class="upload-card-sub">The spreadsheet containing records to be verified. '
-            f'All rows are traversed — no sampling.</div>'
+            f'<div class="upload-card-title">Datasets &amp; Reference Documents</div>'
+            f'<div class="upload-card-sub">Drop everything here — files are sorted automatically: '
+            f'<b>.xlsx</b> spreadsheets become datasets (one audit report each), '
+            f'<b>.pdf / .docx</b> files become reference documents (e.g. forms your procedure '
+            f'expects to see — filename must match the dataset column value exactly).</div>'
             f'<div style="margin-top:8px;font-size:10.5px;color:{t["muted"]}">'
-            f'XLSX only</div>'
+            f'XLSX (dataset) · PDF / DOCX (reference document) — mix and match freely</div>'
             f'</div>',
             unsafe_allow_html=True,
         )
-        dataset_file = st.file_uploader(
-            "dataset",
-            type=["xlsx"],
-            label_visibility="collapsed",
-        )
-
-    with c_supp:
-        st.markdown(
-            f'<div class="upload-card-hdr" style="border-top-color:{t["muted"]}">'
-            f'<div class="upload-card-icon">📎</div>'
-            f'<div class="upload-card-title">Reference Documents <span style="font-size:10px;'
-            f'font-weight:400;color:{t["muted"]}">Optional</span></div>'
-            f'<div class="upload-card-sub">Forms, checklists, or certificates that your '
-            f'procedure expects to be present. Filename must match the dataset column exactly.</div>'
-            f'<div style="margin-top:8px;font-size:10.5px;color:{t["muted"]}">'
-            f'PDF · DOCX</div>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-        supp_files = st.file_uploader(
-            "supported_docs",
-            type=["pdf", "docx"],
+        mixed_files = st.file_uploader(
+            "datasets_and_docs",
+            type=["xlsx", "pdf", "docx"],
             accept_multiple_files=True,
             label_visibility="collapsed",
         )
-        if supp_files:
-            names = [f.name for f in supp_files]
-            name_pills = "".join(
+
+        dataset_files = [f for f in (mixed_files or []) if f.name.lower().endswith(".xlsx")]
+        supp_files    = [f for f in (mixed_files or []) if not f.name.lower().endswith(".xlsx")]
+
+        def _pill_row(label: str, files: list) -> str:
+            pills = "".join(
                 f'<code style="background:{t["surface"]};border:1px solid {t["border"]};'
                 f'border-radius:4px;padding:2px 7px;font-size:11px;'
-                f'color:{t["accent"]};margin:2px 3px 2px 0;display:inline-block">{n}</code>'
-                for n in names
+                f'color:{t["accent"]};margin:2px 3px 2px 0;display:inline-block">{f.name}</code>'
+                for f in files
             )
-            st.markdown(
-                f'<div style="font-size:12px;color:{t["text"]};margin-top:8px;line-height:1.8">'
-                f'{name_pills}'
-                f'</div>',
-                unsafe_allow_html=True,
+            return (
+                f'<div style="font-size:11px;color:{t["muted"]};margin-top:8px">{label}</div>'
+                f'<div style="font-size:12px;line-height:1.8">{pills}</div>'
             )
 
+        if dataset_files or supp_files:
+            html = ""
+            if dataset_files:
+                html += _pill_row(f"📊 Recognised as datasets ({len(dataset_files)}) — one report per file:", dataset_files)
+            if supp_files:
+                html += _pill_row(f"📎 Recognised as reference documents ({len(supp_files)}):", supp_files)
+            st.markdown(html, unsafe_allow_html=True)
+
     st.markdown("<br>", unsafe_allow_html=True)
-    ready = bool(proc_files and dataset_file)
+    ready = bool(proc_files and dataset_files)
     if not ready:
         st.markdown(
             f'<div style="font-size:12px;color:{t["muted"]};text-align:center;'
-            f'padding:6px 0 2px">Upload at least one procedure document and a dataset to continue.</div>',
+            f'padding:6px 0 2px">Upload at least one procedure document and one .xlsx dataset to continue. '
+            f'Uploading several datasets queues one audit report per dataset.</div>',
             unsafe_allow_html=True,
         )
 
     if st.button("Run Audit  →", type="primary", disabled=not ready):
         doc_names = [f.name for f in supp_files] if supp_files else []
-        _run_pipeline_phase1(proc_files, dataset_file, doc_names)
+        _start_multi_dataset_run(proc_files, dataset_files, doc_names)
 
 
-def _run_pipeline_phase1(proc_files, dataset_file, doc_names=None) -> None:
+def _start_multi_dataset_run(proc_files, dataset_files, doc_names=None) -> None:
+    """
+    Seeds the multi-dataset queue and kicks off phase1 for the first dataset.
+    Procedure files + doc names are cached as raw bytes so they survive reruns
+    while the remaining datasets in the queue are processed one by one.
+    """
+    st.session_state.proc_files_cache = [(f.name, f.getvalue()) for f in proc_files]
+    st.session_state.doc_names_cache  = doc_names or []
+    st.session_state.dataset_results  = {}
+    queue = [(f.name, f.getvalue()) for f in dataset_files]
+    first_name, first_bytes = queue.pop(0)
+    st.session_state.dataset_queue = queue
+    _run_pipeline_phase1(first_name, first_bytes)
+
+
+def _run_pipeline_phase1(ds_name: str, ds_bytes: bytes) -> None:
+    """Runs phase1 (rule extraction + column mapping) for ONE dataset from the queue."""
+    st.session_state.current_ds_name = ds_name
     status   = st.empty()
     progress = st.progress(0)
 
@@ -512,27 +540,27 @@ def _run_pipeline_phase1(proc_files, dataset_file, doc_names=None) -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         proc_paths = []
-        for f in proc_files:
-            p = os.path.join(tmp, f.name)
+        for fname, fbytes in st.session_state.proc_files_cache:
+            p = os.path.join(tmp, fname)
             with open(p, "wb") as fout:
-                fout.write(f.getvalue())
+                fout.write(fbytes)
             proc_paths.append(p)
 
-        ds_path = os.path.join(tmp, dataset_file.name)
+        ds_path = os.path.join(tmp, ds_name)
         with open(ds_path, "wb") as fout:
-            fout.write(dataset_file.getvalue())
+            fout.write(ds_bytes)
 
         try:
             from audit.pipeline_v2 import run_pipeline_phase1
             phase1 = run_pipeline_phase1(
                 proc_paths, ds_path,
-                supported_doc_names=doc_names or [],
+                supported_doc_names=st.session_state.doc_names_cache or [],
                 on_progress=log,
             )
         except Exception as e:
             status.empty()
             progress.empty()
-            st.error(f"Pipeline failed: {e}")
+            st.error(f"Pipeline failed on dataset '{ds_name}': {e}")
             return
 
     progress.progress(100)
@@ -541,6 +569,16 @@ def _run_pipeline_phase1(proc_files, dataset_file, doc_names=None) -> None:
     st.session_state.phase1 = phase1
     st.session_state.page   = "col_review"
     st.rerun()
+
+
+def _dataset_progress_label() -> str:
+    """'Dataset 2 of 3 — filename.xlsx' — shown on review pages during a multi-dataset run."""
+    done  = len(st.session_state.dataset_results or {})
+    total = done + 1 + len(st.session_state.dataset_queue or [])
+    name  = st.session_state.current_ds_name or ""
+    if total <= 1:
+        return ""
+    return f"  ·  Dataset {done + 1} of {total} — {name}"
 
 
 def _run_pipeline_phase2(phase1, col_map: dict) -> None:
@@ -632,13 +670,20 @@ def _run_pipeline_phase4(phase1, col_map: dict, rule_checks, applicable_rules, d
     progress.progress(100)
     status.empty()
     progress.empty()
-    st.session_state.results       = results
+
+    st.session_state.dataset_results[st.session_state.current_ds_name] = results
     st.session_state.phase1        = None
     st.session_state.phase2        = None
     st.session_state.phase3        = None
     st.session_state.audit_col_map = None
-    st.session_state.page          = "results"
-    st.rerun()
+
+    if st.session_state.dataset_queue:
+        next_name, next_bytes = st.session_state.dataset_queue.pop(0)
+        _run_pipeline_phase1(next_name, next_bytes)
+    else:
+        st.session_state.current_ds_name = None
+        st.session_state.page = "results"
+        st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -660,7 +705,8 @@ def page_col_review() -> None:
     phase1 = st.session_state.phase1
 
     _header("Column Mapping Review",
-            "Step 2 of 3 — Verify AI-generated column meanings before running the audit")
+            "Step 2 of 3 — Verify AI-generated column meanings before running the audit"
+            + _dataset_progress_label())
 
     n_total    = len(phase1.headers)
     n_relevant = sum(1 for h in phase1.headers if phase1.col_map.get(h, {}).get("audit_relevant"))
@@ -708,8 +754,8 @@ def page_col_review() -> None:
 
     with cb:
         if st.button("← Back", key="col_back_btn"):
-            st.session_state.page   = "upload"
-            st.session_state.phase1 = None
+            _reset_multi_dataset_state()
+            st.session_state.page = "upload"
             st.rerun()
 
     with cp:
@@ -785,7 +831,8 @@ def page_rule_review() -> None:
     ver     = st.session_state.rr_version
 
     _header("Rule Review",
-            "Step 3 of 4 — Review, edit and move rules freely before running the audit")
+            "Step 3 of 4 — Review, edit and move rules freely before running the audit"
+            + _dataset_progress_label())
 
     st.markdown(
         f'<div style="background:{t["surface"]};border:1px solid {t["border"]};'
@@ -1029,7 +1076,8 @@ def page_rule_check_review() -> None:
     col_opts   = [_NONE] + audit_cols
 
     _header("Rule Check Review",
-            "Step 4 of 5 — Verify how each rule will be computed before running the audit")
+            "Step 4 of 5 — Verify how each rule will be computed before running the audit"
+            + _dataset_progress_label())
 
     f_count = sum(1 for c in phase3.rule_checks if c.check_type == "formula")
     j_count = sum(1 for c in phase3.rule_checks if c.check_type == "judgment")
@@ -1219,18 +1267,42 @@ def page_rule_check_review() -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 def page_results() -> None:
     _inject_css()
-    t       = _c()
-    results = st.session_state.results
-    report  = results.report
+    dataset_results: dict = st.session_state.dataset_results or {}
+    names = list(dataset_results.keys())
 
     _header("Audit Results")
 
-    cb, _ = st.columns([1, 6])
+    cb, cds = st.columns([1, 6])
     with cb:
         if st.button("← New Audit", key="back_btn"):
-            st.session_state.page    = "upload"
-            st.session_state.results = None
+            _reset_multi_dataset_state()
+            st.session_state.page = "upload"
             st.rerun()
+
+    if not names:
+        st.warning("No audit results available.")
+        return
+
+    if len(names) > 1:
+        with cds:
+            selected = st.selectbox(
+                f"Dataset ({len(names)} audited)", names, key="results_ds_select",
+            )
+    else:
+        selected = names[0]
+
+    _render_dataset_results(dataset_results[selected], selected, show_name=len(names) > 1)
+
+
+def _render_dataset_results(results, ds_name: str, show_name: bool = False) -> None:
+    t      = _c()
+    report = results.report
+
+    if show_name:
+        st.markdown(
+            f'<div class="slbl" style="margin-bottom:10px">Report for: {ds_name}</div>',
+            unsafe_allow_html=True,
+        )
 
     _OCR_NOISE = ("ocr", "scanned pdf", "very little text", "text extracted")
     for w in results.warnings:
