@@ -438,6 +438,18 @@ def _safe_filename(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]+", "_", stem).strip("_") or "dataset"
 
 
+def _past_observations_filename(results, ds_name: str) -> str:
+    """
+    po_<procedures>_<dataset>.json — short but identifiable from the filename alone,
+    without opening it. Uses real filename stems (not initials) so it stays
+    unambiguous; falls back gracefully if procedure names are unavailable.
+    """
+    proc_stems = sorted({_safe_filename(r.source_name) for r in results.all_rules})
+    proc_part  = "+".join(proc_stems) if proc_stems else "procedures"
+    ds_part    = _safe_filename(ds_name)
+    return f"po_{proc_part}_{ds_part}.json"
+
+
 def _build_report_html(results, ds_name: str) -> str:
     """Standalone, shareable HTML snapshot of one dataset's audit report."""
     report = results.report
@@ -709,8 +721,10 @@ def page_upload() -> None:
                 n_cols  = len(parsed.get("columns", []))
                 n_rules = len(parsed.get("applicable_rules", [])) + len(parsed.get("dropped_rules", {}))
                 src     = parsed.get("source_dataset_name", "?")
+                procs   = ", ".join(parsed.get("procedure_names", [])) or "?"
                 st.caption(
-                    f"✓ Loaded — {n_cols} columns, {n_rules} rule decisions from **{src}**."
+                    f"✓ Loaded — {n_cols} columns, {n_rules} rule decisions from "
+                    f"procedure(s) **{procs}** · dataset **{src}**."
                 )
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -1628,7 +1642,7 @@ def _render_dataset_results(results, ds_name: str, show_name: bool = False) -> N
         st.download_button(
             "⬇ Download Past Observations (.json)",
             data=po.dumps(results, ds_name),
-            file_name=f"past_observations_{_safe_filename(ds_name)}.json",
+            file_name=_past_observations_filename(results, ds_name),
             mime="application/json",
             use_container_width=True,
             help="Save this to skip column mapping, rule filtering, and rule check "
