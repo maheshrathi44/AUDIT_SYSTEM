@@ -17,3 +17,7 @@ class DraftRule:
     timeline_days: int | None = None
 
     keywords: list[str] = field(default_factory=list)
+
+    # True only for a rule extracted from a past human-written audit report
+    # (not a procedure). Defaults False for every existing rule source.
+    is_manual: bool = False

@@ -55,6 +55,11 @@ class RuleVerdict:
     miss_examples:   list[dict] = field(default_factory=list)
     samples:         list[dict] = field(default_factory=list)  # judgment only
 
+    # Confidence tally — set afterward by pipeline_v2 (not by this file); left at
+    # neutral defaults here so nothing that constructs a RuleVerdict needs to change.
+    confirm_count:   int = 0
+    disagree_count:  int = 0
+
 
 def _formula_verdict(fr: FormulaResult, check: RuleCheck) -> RuleVerdict:
     pct = fr.compliance_pct

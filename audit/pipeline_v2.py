@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from audit import past_observations as po
+from audit import confidence, past_observations as po
 from audit.engine.traversal import DetailedData, traverse
 from audit.engine.verdict import RuleVerdict, generate_verdicts
 from audit.extractors import read_excel_raw, read_procedure_file
@@ -314,13 +314,38 @@ def run_pipeline_phase3(
     )
 
 
+def _attach_confidence_tally(
+    verdicts:          list[RuleVerdict],
+    rule_checks:       list[RuleCheck],
+    past_observations: dict | None,
+) -> None:
+    """
+    Seeds each verdict's confirm/disagree tally (mutates in place, after verdicts
+    already exist — does not affect how any verdict itself was computed):
+      - a saved tally in Past Audit Settings is carried over exactly as-is
+      - otherwise, a rule from a Past Audit Report starts seeded straight to High
+      - otherwise, starts neutral (Medium)
+    """
+    rule_by_id = {c.rule_id: c.rule for c in rule_checks}
+    for v in verdicts:
+        saved = po.get_confidence_tally(past_observations, v.rule_id)
+        if saved is not None:
+            v.confirm_count, v.disagree_count = saved
+        else:
+            rule = rule_by_id.get(v.rule_id)
+            v.confirm_count, v.disagree_count = confidence.seed_tally(
+                is_manual=bool(getattr(rule, "is_manual", False))
+            )
+
+
 def run_pipeline_phase4(
-    phase1:           PipelinePhase1Result,
-    col_map:          dict,
-    rule_checks:      list[RuleCheck],
-    applicable_rules: list[DraftRule],
-    dropped_rules:    dict[str, str],
-    on_progress:      Callable[[str], None] | None = None,
+    phase1:            PipelinePhase1Result,
+    col_map:            dict,
+    rule_checks:        list[RuleCheck],
+    applicable_rules:   list[DraftRule],
+    dropped_rules:      dict[str, str],
+    on_progress:        Callable[[str], None] | None = None,
+    past_observations:  dict | None = None,
 ) -> PipelineV2Result:
     """Steps 5-7 — traverse, verdicts, report. Takes user-edited rule checks."""
     warnings = list(phase1.warnings)
@@ -357,6 +382,7 @@ def run_pipeline_phase4(
     log("Step 2/3 — Generating verdicts...")
     verdicts = generate_verdicts(detailed_data, rule_checks, on_progress=log)
     log(f"  {len(verdicts)} verdicts generated")
+    _attach_confidence_tally(verdicts, rule_checks, past_observations)
 
     log("Step 3/3 — Writing audit report...")
     report = generate_report(verdicts)

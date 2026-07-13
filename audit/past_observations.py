@@ -32,6 +32,12 @@ def build_past_observations(results, dataset_name: str) -> dict:
         "applicable_rules":    [dataclasses.asdict(r) for r in results.applicable_rules],
         "dropped_rules":       results.dropped_rules,
         "rule_checks":         [dataclasses.asdict(c) for c in results.rule_checks],
+        # Optional — absent in files saved before this existed, which is fine:
+        # get_confidence_tally() below defaults to (0, 0) when a rule isn't present.
+        "confidence_tally": {
+            v.rule_id: {"confirm": v.confirm_count, "disagree": v.disagree_count}
+            for v in results.verdicts
+        },
     }
 
 
@@ -114,3 +120,18 @@ def split_rule_checks(
         else:
             remaining.append(r)
     return reused, remaining
+
+
+def get_confidence_tally(past: dict | None, rule_id: str) -> tuple[int, int] | None:
+    """
+    Saved (confirm, disagree) counts for a rule_id, carried over exactly as they
+    were — no automatic adjustment just for being reused. Returns None if this
+    rule has no saved tally yet (including for every file saved before this
+    existed), so the caller falls back to a fresh seed instead.
+    """
+    if not past:
+        return None
+    entry = past.get("confidence_tally", {}).get(rule_id)
+    if not entry:
+        return None
+    return int(entry.get("confirm", 0)), int(entry.get("disagree", 0))

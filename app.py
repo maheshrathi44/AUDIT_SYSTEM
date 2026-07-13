@@ -11,7 +11,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from audit import past_observations as po
+from audit import confidence, past_observations as po
 
 _ASSETS = Path(__file__).parent / "assets"
 
@@ -395,6 +395,13 @@ def _badge(verdict: str) -> str:
 def _risk_badge(risk: str) -> str:
     cls = {"High": "b-high", "Medium": "b-medium", "Low": "b-low"}.get(risk, "b-medium")
     return f'<span class="badge {cls}">{risk} Risk</span>'
+
+
+def _confidence_badge(label: str) -> str:
+    # High confidence reuses the "pass"(green) look, Low reuses "fail"(red) —
+    # same visual language as the verdict/risk badges, just a different meaning.
+    cls = {"High": "b-pass", "Medium": "b-partial", "Low": "b-fail"}.get(label, "b-partial")
+    return f'<span class="badge {cls}">Confidence: {label}</span>'
 
 
 def _kpi(label: str, value: str) -> str:
@@ -917,6 +924,7 @@ def _run_pipeline_phase4(phase1, col_map: dict, rule_checks, applicable_rules, d
         results = run_pipeline_phase4(
             phase1, col_map, rule_checks, applicable_rules, dropped_rules,
             on_progress=log,
+            past_observations=st.session_state.past_observations_cache,
         )
     except Exception as e:
         status.empty()
@@ -1710,19 +1718,21 @@ def _render_dataset_results(results, ds_name: str, show_name: bool = False) -> N
 
         header_html = (
             "<thead><tr>"
-            "<th>Rule ID</th><th>Verdict</th><th>Non-Compliance</th><th>Risk</th>"
+            "<th>Rule ID</th><th>Verdict</th><th>Non-Compliance</th><th>Risk</th><th>Confidence</th>"
             "<th>Total</th><th>Pass</th><th>Fail</th><th>Missing</th>"
             "</tr></thead>"
         )
         rows_html = ""
         for v in results.verdicts:
             nc = _nc_pct(v.compliance_pct)
+            conf_label = confidence.confidence_label(v.confirm_count, v.disagree_count)
             rows_html += (
                 f"<tr>"
                 f'<td><a class="rid-link" href="#vcard-{v.rule_id}">{v.rule_id}</a></td>'
                 f"<td>{_badge(v.verdict)}</td>"
                 f'<td style="color:{_bar_color(v.compliance_pct)};font-weight:600">{nc}%</td>'
                 f"<td>{_risk_badge(v.risk)}</td>"
+                f"<td>{_confidence_badge(conf_label)}</td>"
                 f'<td style="color:{t["text"]}">{v.total_rows:,}</td>'
                 f'<td class="num-pass">{v.pass_count:,}</td>'
                 f'<td class="num-fail">{v.fail_count:,}</td>'
@@ -1749,6 +1759,7 @@ def _render_dataset_results(results, ds_name: str, show_name: bool = False) -> N
                 "Pass": "vcard-pass", "Fail": "vcard-fail",
                 "Partial": "vcard-partial", "Missing": "vcard-missing",
             }.get(v.verdict, "vcard-missing")
+            conf_label = confidence.confidence_label(v.confirm_count, v.disagree_count)
 
             stat_style = "display:flex;gap:28px;margin-top:12px;align-items:flex-end"
             def _stat(val, label, color):
@@ -1767,7 +1778,7 @@ def _render_dataset_results(results, ds_name: str, show_name: bool = False) -> N
                 f'<span style="font-size:13px;font-weight:700;color:{t["accent"]};font-family:monospace">{v.rule_id}</span>'
                 f'<span class="check-type-lbl">{v.check_type}</span>'
                 f'</div>'
-                f'<div style="display:flex;gap:6px">{_badge(v.verdict)}&nbsp;{_risk_badge(v.risk)}</div>'
+                f'<div style="display:flex;gap:6px">{_badge(v.verdict)}&nbsp;{_risk_badge(v.risk)}&nbsp;{_confidence_badge(conf_label)}</div>'
                 f'</div>'
                 # rule statement
                 f'<div style="font-size:13px;color:{t["text"]};line-height:1.55;margin-bottom:8px">'
@@ -1791,6 +1802,46 @@ def _render_dataset_results(results, ds_name: str, show_name: bool = False) -> N
                 + f'</div></div>',
                 unsafe_allow_html=True,
             )
+
+            # One vote per rule per session: confirm OR disagree OR neither — clicking
+            # the active choice again reverts it; clicking the other one switches it.
+            # Never stacks past ±1 from whatever tally this rule started the session with.
+            votes = st.session_state.setdefault("rule_votes", {})
+            vote_key = f"{ds_name}::{v.rule_id}"
+            current_vote = votes.get(vote_key)
+
+            cf1, cf2, cf3 = st.columns([1, 1, 4])
+            with cf1:
+                if st.button("✓ Confirm", key=f"conf_up_{ds_name}_{v.rule_id}",
+                             help="This rule is a good, meaningful check — increase confidence."):
+                    if current_vote == "confirm":
+                        v.confirm_count -= 1
+                        votes.pop(vote_key, None)
+                    else:
+                        if current_vote == "disagree":
+                            v.disagree_count -= 1
+                        v.confirm_count += 1
+                        votes[vote_key] = "confirm"
+                    st.rerun()
+            with cf2:
+                if st.button("✕ Disagree", key=f"conf_down_{ds_name}_{v.rule_id}",
+                             help="This rule isn't a reliable/good check — decrease confidence."):
+                    if current_vote == "disagree":
+                        v.disagree_count -= 1
+                        votes.pop(vote_key, None)
+                    else:
+                        if current_vote == "confirm":
+                            v.confirm_count -= 1
+                        v.disagree_count += 1
+                        votes[vote_key] = "disagree"
+                    st.rerun()
+            with cf3:
+                st.markdown(
+                    f'<div style="font-size:11px;color:{t["muted"]};margin-top:8px">'
+                    f'{v.confirm_count} confirm · {v.disagree_count} disagree — carried into your '
+                    f'next Past Audit Settings download</div>',
+                    unsafe_allow_html=True,
+                )
 
             if v.fail_examples:
                 with st.expander(f"⚠ Sample failures ({len(v.fail_examples)}) — {v.rule_id}"):
