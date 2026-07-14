@@ -12,6 +12,7 @@ import pandas as pd
 import streamlit as st
 
 from audit import confidence, past_observations as po
+from audit.schemas.rule_schema import DraftRule
 
 _ASSETS = Path(__file__).parent / "assets"
 
@@ -1200,6 +1201,37 @@ def page_rule_review() -> None:
         f'</div>',
         unsafe_allow_html=True,
     )
+
+    with st.expander("+ Add a new rule"):
+        new_stmt = st.text_area(
+            "Rule statement", key=f"rr_new_stmt_{ver}", height=70,
+            placeholder="e.g. Every FTIR must record a countermeasure before closure.",
+        )
+        nc1, nc2, nc3 = st.columns([2, 2, 1])
+        with nc1:
+            new_type = st.selectbox("Type", _RULE_TYPES, key=f"rr_new_type_{ver}")
+        with nc2:
+            new_priority = st.selectbox("Priority", _PRIORITIES, key=f"rr_new_priority_{ver}")
+        with nc3:
+            st.markdown("<div style='margin-top:26px'></div>", unsafe_allow_html=True)
+            if st.button("+ Add", key=f"rr_add_btn_{ver}", disabled=not new_stmt.strip()):
+                existing_user_ids = [r.rule_id for r in phase1.all_rules if r.rule_id.startswith("USER_R")]
+                new_id = f"USER_R{len(existing_user_ids) + 1:02d}"
+                new_rule = DraftRule(
+                    rule_id=new_id, section="User Added", source_section="User Added",
+                    statement=new_stmt.strip(), source_name="user-added", procedure_id="",
+                    rule_type=new_type, priority=new_priority.lower(),
+                )
+                # Added straight into phase1.all_rules — everything downstream (rule check
+                # generation, traversal, verdicts, confidence, Past Audit Settings) treats
+                # it exactly like any procedure/report rule, no special-casing needed.
+                phase1.all_rules.append(new_rule)
+                st.session_state.rr_applicable.append({
+                    "Rule ID": new_id, "Statement": new_rule.statement,
+                    "Type": new_rule.rule_type, "Priority": new_rule.priority.title(),
+                })
+                st.session_state.rr_version += 1
+                st.rerun()
 
     tab_app, tab_drop = st.tabs([
         f"Applicable Rules  ({len(rr_app)})",
