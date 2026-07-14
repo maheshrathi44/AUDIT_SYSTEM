@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from audit import confidence, past_observations as po
 from audit.schemas.rule_schema import DraftRule
@@ -450,6 +451,42 @@ def _safe_filename(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]+", "_", stem).strip("_") or "dataset"
 
 
+def _scroll_into_view() -> None:
+    """
+    Nudges the page down a little so the progress status line (which otherwise
+    renders below the fold on longer pages) is visible without the user having
+    to scroll manually. Purely cosmetic. st.markdown strips <script> tags, so
+    this uses st.components.v1.html (runs in an iframe) and reaches back out to
+    the real page via window.parent. Streamlit scrolls an inner container, not
+    the outer window itself, and which element that is has changed across
+    versions — so this tries several known candidates and scrolls whichever
+    one actually turns out to be scrollable.
+    """
+    components.html(
+        """<script>
+        try {
+            const doc = window.parent.document;
+            const candidates = [
+                doc.querySelector('section.main'),
+                doc.querySelector('[data-testid="stMain"]'),
+                doc.querySelector('[data-testid="stAppViewContainer"]'),
+                doc.querySelector('[data-testid="stAppViewBlockContainer"]'),
+                doc.scrollingElement,
+                doc.documentElement,
+                doc.body,
+            ];
+            for (const el of candidates) {
+                if (el && el.scrollHeight > el.clientHeight + 5) {
+                    el.scrollBy({top: 280, behavior: 'smooth'});
+                    break;
+                }
+            }
+        } catch (e) {}
+        </script>""",
+        height=0,
+    )
+
+
 def _past_observations_filename(results, ds_name: str) -> str:
     """
     po_<procedures>_<dataset>.json — short but identifiable from the filename alone,
@@ -816,6 +853,7 @@ def _run_pipeline_phase1(ds_name: str, ds_bytes: bytes) -> None:
     st.session_state.current_ds_name = ds_name
     status   = st.empty()
     progress = st.progress(0)
+    _scroll_into_view()
 
     def log(msg: str) -> None:
         status.info(msg)
@@ -900,6 +938,7 @@ def _run_pipeline_phase2(phase1, col_map: dict) -> None:
     """Runs step 3 (rule filter) then goes to rule_review page."""
     status   = st.empty()
     progress = st.progress(0)
+    _scroll_into_view()
 
     def log(msg: str) -> None:
         status.info(msg)
@@ -932,6 +971,7 @@ def _run_pipeline_phase3(phase1, col_map: dict, applicable_rules, dropped_rules:
     """Runs step 4 (rule check generation) then goes to rule_check_review page."""
     status   = st.empty()
     progress = st.progress(0)
+    _scroll_into_view()
 
     def log(msg: str) -> None:
         status.info(msg)
@@ -965,6 +1005,7 @@ def _run_pipeline_phase4(phase1, col_map: dict, rule_checks, applicable_rules, d
     """Runs steps 5-7 (traverse, verdicts, report) then goes to results page."""
     status   = st.empty()
     progress = st.progress(0)
+    _scroll_into_view()
 
     def log(msg: str) -> None:
         status.info(msg)
