@@ -68,23 +68,32 @@ def extract_rules_llm(
     procedure_text: str,
     source_name: str = "procedure",
     procedure_id: str = "",
+    system_prompt: str | None = None,
+    is_manual: bool = False,
 ) -> list[DraftRule]:
     """
     Extract auditable rules from procedure text.
-    Cache key = SHA256 of content — same file, any filename → instant hit.
-    Delete .audit_cache/ to force fresh extraction.
+    Cache key = SHA256 of content (+ manual/procedure kind) — same file, any
+    filename → instant hit. Delete .audit_cache/ to force fresh extraction.
+
+    system_prompt / is_manual: used by manual_report_extractor.py to reuse this
+    same caching + parsing machinery with a differently-worded prompt for a past
+    human-written audit report instead of a procedure. Every existing caller
+    omits both, so existing behavior is unchanged.
     """
     from pathlib import Path as _Path
     stem = procedure_id or _Path(source_name).stem
+    prompt = system_prompt or _SYSTEM
 
     # ── cache lookup ───────────────────────────────────────────────────────────
     _CACHE_DIR.mkdir(exist_ok=True)
-    cache_file = _CACHE_DIR / f"rules_{_content_hash(procedure_text)}.json"
+    kind = "manual_" if is_manual else ""
+    cache_file = _CACHE_DIR / f"rules_{kind}{_content_hash(procedure_text)}.json"
 
     if cache_file.exists():
         try:
             data = json.loads(cache_file.read_text())
-            rules = _parse_rules(data.get("rules", []), source_name, stem)
+            rules = _parse_rules(data.get("rules", []), source_name, stem, is_manual=is_manual)
             if rules:
                 print(f"    (cache hit — {len(rules)} rules, skipping LLM for {source_name})")
                 return rules
@@ -94,9 +103,9 @@ def extract_rules_llm(
     # ── LLM extraction ─────────────────────────────────────────────────────────
     response = chat(
         [
-            {"role": "system", "content": _SYSTEM},
+            {"role": "system", "content": prompt},
             {"role": "user", "content": (
-                "Extract all auditable rules from this procedure document:\n\n"
+                "Extract all auditable rules from this document:\n\n"
                 + procedure_text[:12000]
             )},
         ],
@@ -109,7 +118,7 @@ def extract_rules_llm(
         print(f"  WARN: LLM returned invalid JSON for {source_name}")
         return []
 
-    rules = _parse_rules(data.get("rules", []), source_name, stem)
+    rules = _parse_rules(data.get("rules", []), source_name, stem, is_manual=is_manual)
 
     # save to cache
     cache_file.write_text(json.dumps({"source_name": source_name, "rules": data.get("rules", [])}, indent=2))
@@ -117,7 +126,7 @@ def extract_rules_llm(
     return rules
 
 
-def _parse_rules(raw: list[dict], source_name: str, stem: str) -> list[DraftRule]:
+def _parse_rules(raw: list[dict], source_name: str, stem: str, is_manual: bool = False) -> list[DraftRule]:
     rules = []
     for i, r in enumerate(raw, start=1):
         stmt = str(r.get("statement", "")).strip()
@@ -134,5 +143,6 @@ def _parse_rules(raw: list[dict], source_name: str, stem: str) -> list[DraftRule
             priority=str(r.get("priority", "medium")),
             timeline_days=r.get("timeline_days"),
             keywords=[str(k).lower() for k in r.get("keywords", [])],
+            is_manual=is_manual,
         ))
     return rules

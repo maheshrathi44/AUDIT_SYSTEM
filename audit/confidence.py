@@ -6,9 +6,9 @@ Built from a running confirm/disagree tally per rule, not a flat point score:
 
 This is a Beta-Bernoulli posterior mean with a symmetric neutral prior — a rule
 with no votes yet sits exactly at the Medium midpoint. PRIOR_WEIGHT controls how
-many real votes it takes to move off that midpoint: with PRIOR_WEIGHT = 2, two
+many real votes it takes to move off that midpoint: with PRIOR_WEIGHT = 3, three
 ticks in a row (no disagreements between them) cross from Medium into High, and
-two crosses/unticks in a row cross from Medium into Low.
+three crosses/unticks in a row cross from Medium into Low.
 
 Standalone module — does not import from or get called by any existing
 extraction/filtering/traversal/verdict/report code. Nothing here changes how a
@@ -17,7 +17,7 @@ verdict itself is computed; it only scores a tally that's attached afterward.
 
 from __future__ import annotations
 
-PRIOR_WEIGHT = 2  # "worth" of the neutral starting position, in votes
+PRIOR_WEIGHT = 3  # "worth" of the neutral starting position, in votes
 
 # A rule extracted from a Past Audit Report starts with this much built-in trust —
 # equivalent to PRIOR_WEIGHT real confirmations, which lands exactly at High.

@@ -30,7 +30,7 @@ from audit import confidence, past_observations as po
 from audit.engine.traversal import DetailedData, traverse
 from audit.engine.verdict import RuleVerdict, generate_verdicts
 from audit.extractors import read_excel_raw, read_procedure_file
-from audit.llm import extract_rules_llm, map_columns
+from audit.llm import extract_manual_findings_llm, extract_rules_llm, map_columns
 from audit.llm.report_writer import AuditReport, generate_report
 from audit.llm.rule_check_generator import RuleCheck, dict_to_check, generate_rule_checks
 from audit.llm.rule_filter import filter_rules
@@ -108,19 +108,24 @@ def _find_case_col(headers: list[str], col_map: dict) -> str | None:
 
 
 def run_pipeline_phase1(
-    procedure_paths:    list[str],
-    dataset_path:       str,
+    procedure_paths:     list[str],
+    dataset_path:        str,
     supported_doc_names=None,
-    on_progress:        Callable[[str], None] | None = None,
-    past_observations:  dict | None = None,
+    on_progress:         Callable[[str], None] | None = None,
+    past_observations:   dict | None = None,
+    manual_report_paths: list[str] | None = None,
 ) -> PipelinePhase1Result:
     """
     Steps 1-2 only. Returns phase1 result for user review of column meanings.
     past_observations: optional parsed Past Observations file (see audit.past_observations) —
     columns it already covers are pre-filled, skipping the LLM call for those columns.
+    manual_report_paths: optional past human-written audit report(s) (PDF/DOCX/TXT) —
+    findings extracted from these flow into the same rule review/rule-check pipeline
+    as procedure rules, tagged is_manual=True (seeds them at High confidence).
     """
     warnings: list[str] = []
     supported_doc_names = supported_doc_names or []
+    manual_report_paths = manual_report_paths or []
 
     def log(msg: str) -> None:
         if on_progress:
@@ -140,6 +145,20 @@ def run_pipeline_phase1(
             r.rule_id = f"{prefix}_{r.rule_id}"
         log(f"  {len(rules)} rules from {path.name}")
         all_rules.extend(rules)
+
+    for path_str in manual_report_paths:
+        path = Path(path_str)
+        log(f"  Reading past audit report: {path.name}")
+        doc = read_procedure_file(path_str)
+        for w in doc.warnings:
+            warnings.append(w)
+        rules  = extract_manual_findings_llm(doc.text, source_name=path.name, procedure_id=path.stem)
+        prefix = path.stem[:8].upper().replace(" ", "_")
+        for r in rules:
+            r.rule_id = f"{prefix}_{r.rule_id}"
+        log(f"  {len(rules)} findings from past audit report {path.name}")
+        all_rules.extend(rules)
+
     log(f"  Total: {len(all_rules)} rules extracted")
 
     log("Step 2/2 — Reading dataset + mapping columns...")

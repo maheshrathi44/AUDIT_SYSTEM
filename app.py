@@ -85,8 +85,10 @@ for k, v in [
     ("dataset_queue", None), ("dataset_results", None), ("current_ds_name", None),
     # cross-dataset reuse within one run — schema (sorted column set) → confirmed decisions
     ("schema_cache", None), ("dataset_reuse_notes", None),
-    # Past Observations uploaded on page 1 — parsed dict, reused across the whole run
+    # Past Audit Settings uploaded on page 1 — parsed dict, reused across the whole run
     ("past_observations_cache", None),
+    # Past Audit Report(s) uploaded on page 1 — raw bytes, findings extracted per dataset run
+    ("manual_report_files_cache", None),
 ]:
     if k not in st.session_state:
         st.session_state[k] = v
@@ -104,9 +106,11 @@ def _reset_multi_dataset_state() -> None:
     st.session_state.dataset_queue       = None
     st.session_state.dataset_results     = None
     st.session_state.current_ds_name     = None
-    st.session_state.schema_cache            = None
-    st.session_state.dataset_reuse_notes     = None
-    st.session_state.past_observations_cache = None
+    st.session_state.schema_cache              = None
+    st.session_state.dataset_reuse_notes       = None
+    st.session_state.past_observations_cache   = None
+    st.session_state.manual_report_files_cache = None
+    st.session_state.rule_votes                = {}
 
 
 # ── Theme ──────────────────────────────────────────────────────────────────────
@@ -632,7 +636,7 @@ def page_upload() -> None:
         unsafe_allow_html=True,
     )
 
-    c_proc, c_data, c_past = st.columns(3, gap="medium")
+    c_proc, c_data, c_settings, c_report = st.columns(4, gap="medium")
 
     with c_proc:
         st.markdown(
@@ -699,11 +703,11 @@ def page_upload() -> None:
             st.markdown(pills_html, unsafe_allow_html=True)
 
     past_observations = None
-    with c_past:
+    with c_settings:
         st.markdown(
             f'<div class="upload-card-hdr" style="border-top-color:{t["muted"]}">'
             f'<div class="upload-card-icon">🗂️</div>'
-            f'<div class="upload-card-title">Past Observations <span style="font-size:10px;'
+            f'<div class="upload-card-title">Past Audit Settings <span style="font-size:10px;'
             f'font-weight:400;color:{t["muted"]}">Optional</span></div>'
             f'<div class="upload-card-sub">Downloaded from a previous audit\'s Results page. '
             f'Columns and rules it already covers are pre-filled automatically — only new ones '
@@ -722,7 +726,7 @@ def page_upload() -> None:
         if past_obs_file is not None:
             parsed = po.load(past_obs_file.getvalue())
             if parsed is None:
-                st.error("Not a valid Past Observations file — it will be ignored.")
+                st.error("Not a valid Past Audit Settings file — it will be ignored.")
             else:
                 past_observations = parsed
                 n_cols  = len(parsed.get("columns", []))
@@ -733,6 +737,40 @@ def page_upload() -> None:
                     f"✓ Loaded — {n_cols} columns, {n_rules} rule decisions from "
                     f"procedure(s) **{procs}** · dataset **{src}**."
                 )
+
+    with c_report:
+        st.markdown(
+            f'<div class="upload-card-hdr" style="border-top-color:{t["muted"]}">'
+            f'<div class="upload-card-icon">📄</div>'
+            f'<div class="upload-card-title">Past Audit Report <span style="font-size:10px;'
+            f'font-weight:400;color:{t["muted"]}">Optional</span></div>'
+            f'<div class="upload-card-sub">A completed, human-written audit report from before — '
+            f'not a procedure. Its findings are read as extra rules and start at '
+            f'<b>High confidence</b>, since a human already validated them in a real audit.</div>'
+            f'<div style="margin-top:8px;font-size:10.5px;color:{t["muted"]}">'
+            f'PDF · DOCX · TXT — not for scanned/image documents</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        manual_report_files = st.file_uploader(
+            "past_audit_report",
+            type=["pdf", "docx", "txt"],
+            accept_multiple_files=True,
+            label_visibility="collapsed",
+        )
+        if manual_report_files:
+            names = [f.name for f in manual_report_files]
+            name_pills = "".join(
+                f'<code style="background:{t["surface"]};border:1px solid {t["border"]};'
+                f'border-radius:4px;padding:2px 7px;font-size:11px;'
+                f'color:{t["accent"]};margin:2px 3px 2px 0;display:inline-block">{n}</code>'
+                for n in names
+            )
+            st.markdown(
+                f'<div style="font-size:12px;color:{t["text"]};margin-top:8px;line-height:1.8">'
+                f'{name_pills}</div>',
+                unsafe_allow_html=True,
+            )
 
     st.markdown("<br>", unsafe_allow_html=True)
     ready = bool(proc_files and dataset_files)
@@ -746,21 +784,26 @@ def page_upload() -> None:
 
     if st.button("Run Audit  →", type="primary", disabled=not ready):
         doc_names = [f.name for f in supp_files] if supp_files else []
-        _start_multi_dataset_run(proc_files, dataset_files, doc_names, past_observations)
+        _start_multi_dataset_run(
+            proc_files, dataset_files, doc_names, past_observations, manual_report_files,
+        )
 
 
-def _start_multi_dataset_run(proc_files, dataset_files, doc_names=None, past_observations=None) -> None:
+def _start_multi_dataset_run(
+    proc_files, dataset_files, doc_names=None, past_observations=None, manual_report_files=None,
+) -> None:
     """
     Seeds the multi-dataset queue and kicks off phase1 for the first dataset.
     Procedure files + doc names are cached as raw bytes so they survive reruns
     while the remaining datasets in the queue are processed one by one.
     """
-    st.session_state.proc_files_cache        = [(f.name, f.getvalue()) for f in proc_files]
-    st.session_state.doc_names_cache         = doc_names or []
-    st.session_state.dataset_results         = {}
-    st.session_state.schema_cache            = {}
-    st.session_state.dataset_reuse_notes     = {}
-    st.session_state.past_observations_cache = past_observations
+    st.session_state.proc_files_cache          = [(f.name, f.getvalue()) for f in proc_files]
+    st.session_state.doc_names_cache           = doc_names or []
+    st.session_state.manual_report_files_cache = [(f.name, f.getvalue()) for f in (manual_report_files or [])]
+    st.session_state.dataset_results           = {}
+    st.session_state.schema_cache              = {}
+    st.session_state.dataset_reuse_notes       = {}
+    st.session_state.past_observations_cache   = past_observations
     queue = [(f.name, f.getvalue()) for f in dataset_files]
     first_name, first_bytes = queue.pop(0)
     st.session_state.dataset_queue = queue
@@ -790,6 +833,16 @@ def _run_pipeline_phase1(ds_name: str, ds_bytes: bytes) -> None:
                 fout.write(fbytes)
             proc_paths.append(p)
 
+        # Own subfolder so a same-named manual report can never collide with a procedure file.
+        manual_dir = os.path.join(tmp, "manual_reports")
+        os.makedirs(manual_dir, exist_ok=True)
+        manual_paths = []
+        for fname, fbytes in (st.session_state.manual_report_files_cache or []):
+            p = os.path.join(manual_dir, fname)
+            with open(p, "wb") as fout:
+                fout.write(fbytes)
+            manual_paths.append(p)
+
         ds_path = os.path.join(tmp, ds_name)
         with open(ds_path, "wb") as fout:
             fout.write(ds_bytes)
@@ -801,6 +854,7 @@ def _run_pipeline_phase1(ds_name: str, ds_bytes: bytes) -> None:
                 supported_doc_names=st.session_state.doc_names_cache or [],
                 on_progress=log,
                 past_observations=st.session_state.past_observations_cache,
+                manual_report_paths=manual_paths,
             )
         except Exception as e:
             status.empty()
