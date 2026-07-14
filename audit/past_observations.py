@@ -122,6 +122,35 @@ def split_rule_checks(
     return reused, remaining
 
 
+def get_user_added_rules(past: dict | None) -> list[DraftRule]:
+    """
+    Rules created via the '+ Add a new rule' UI have no procedure or report to be
+    re-extracted from on a later audit, so they can't be picked up by split_rules
+    like everything else — they must be reconstructed directly from what was saved.
+    Only recovers ones that were applicable (dropped_rules only stores a reason
+    string, not enough to rebuild a rule from scratch).
+    """
+    if not past:
+        return []
+    return [
+        DraftRule(
+            rule_id=r.get("rule_id", ""),
+            section=r.get("section", "User Added"),
+            source_section=r.get("source_section", "User Added"),
+            statement=r.get("statement", ""),
+            source_name="user-added",
+            procedure_id=r.get("procedure_id", ""),
+            rule_type=r.get("rule_type", "mandatory"),
+            priority=r.get("priority", "medium"),
+            timeline_days=r.get("timeline_days"),
+            keywords=r.get("keywords", []) or [],
+            is_manual=r.get("is_manual", False),
+        )
+        for r in past.get("applicable_rules", [])
+        if r.get("source_name") == "user-added"
+    ]
+
+
 def get_confidence_tally(past: dict | None, rule_id: str) -> tuple[int, int] | None:
     """
     Saved (confirm, disagree) counts for a rule_id, carried over exactly as they

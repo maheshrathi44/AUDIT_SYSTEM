@@ -159,6 +159,17 @@ def run_pipeline_phase1(
         log(f"  {len(rules)} findings from past audit report {path.name}")
         all_rules.extend(rules)
 
+    # Rules created via the '+ Add a new rule' UI have no procedure/report to be
+    # re-extracted from — recover them directly from Past Audit Settings so they
+    # go through rule filtering / rule-check generation / traversal exactly like
+    # every other rule, instead of silently disappearing on the next audit.
+    if past_observations:
+        existing_ids = {r.rule_id for r in all_rules}
+        for r in po.get_user_added_rules(past_observations):
+            if r.rule_id not in existing_ids:
+                all_rules.append(r)
+                existing_ids.add(r.rule_id)
+
     log(f"  Total: {len(all_rules)} rules extracted")
 
     log("Step 2/2 — Reading dataset + mapping columns...")
