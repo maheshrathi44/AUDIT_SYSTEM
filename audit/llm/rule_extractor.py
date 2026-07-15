@@ -122,7 +122,11 @@ def extract_rules_llm(
 
     # save to cache
     cache_file.write_text(json.dumps({"source_name": source_name, "rules": data.get("rules", [])}, indent=2))
-    print(f"    ({len(rules)} rules extracted and cached for {source_name})")
+    if rules:
+        print(f"    ({len(rules)} rules extracted and cached for {source_name})")
+    else:
+        print(f"  WARN: 0 rules extracted from {source_name} — check that the document actually "
+              f"contains readable text (OCR issue?) and that the LLM returned a non-empty 'rules' list")
     return rules
 
 

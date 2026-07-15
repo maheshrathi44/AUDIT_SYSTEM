@@ -161,6 +161,14 @@ def read_procedure_file(file_path: str) -> ProcedureDocument:
             f"Unsupported procedure format: {suffix or 'unknown'}"
         ]
 
+    # These warnings (OCR fallback, extraction failures, unreadable files) are
+    # deliberately hidden from the UI as noise — print them so they're still
+    # visible in the terminal when something silently produced empty/bad text.
+    for w in warnings:
+        print(f"  [procedure_reader] {path.name}: {w}")
+    if not text.strip():
+        print(f"  WARN: {path.name} produced no extractable text at all")
+
     return ProcedureDocument(
         file_path=str(path),
         file_type=suffix.lstrip("."),

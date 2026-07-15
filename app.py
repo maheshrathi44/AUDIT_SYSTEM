@@ -5,6 +5,7 @@ import html
 import os
 import re
 import tempfile
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -150,7 +151,7 @@ def _inject_css() -> None:
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     font-size: 14px;
 }}
-.block-container {{ padding-top: 1.6rem; padding-bottom: 2.5rem; max-width: 1240px; }}
+.block-container {{ padding-top: 1.6rem; padding-bottom: 2.5rem; max-width: 100%; padding-left: 3rem; padding-right: 3rem; }}
 
 /* Force text colour in Streamlit markdown/text containers */
 .stMarkdown p, .stMarkdown li, .stMarkdown span,
@@ -355,10 +356,12 @@ div[data-baseweb="tooltip"] * {{ color: {t['text']} !important; }}
     background: {t['surface']}; border: 1px solid {t['border']};
     border-top: 3px solid {t['accent']};
     border-radius: 10px 10px 0 0; padding: 14px 18px 12px;
+    min-height: 215px; display: flex; flex-direction: column;
 }}
 .upload-card-icon {{ font-size: 22px; margin-bottom: 6px; }}
 .upload-card-title {{ font-size: 13px; font-weight: 700; color: {t['text']}; }}
 .upload-card-sub {{ font-size: 11px; color: {t['muted']}; margin-top: 2px; line-height: 1.4; }}
+.upload-card-types {{ margin-top: auto; padding-top: 8px; }}
 
 /* ── Check-type mini badge on verdict cards ── */
 .check-type-lbl {{
@@ -684,7 +687,7 @@ def page_upload() -> None:
             f'<div class="upload-card-sub">Standard operating procedures, work instructions, '
             f'quality manuals — any document containing auditable rules. '
             f'Rules extracted here apply to every dataset uploaded on the right.</div>'
-            f'<div style="margin-top:8px;font-size:10.5px;color:{t["muted"]}">'
+            f'<div class="upload-card-types" style="font-size:10.5px;color:{t["muted"]}">'
             f'PDF · DOCX · TXT · MD</div>'
             f'</div>',
             unsafe_allow_html=True,
@@ -705,7 +708,7 @@ def page_upload() -> None:
             f'<b>.xlsx</b> spreadsheets become datasets (one audit report each), '
             f'<b>.pdf / .docx</b> files become reference documents (e.g. forms your procedure '
             f'expects to see — filename must match the dataset column value exactly).</div>'
-            f'<div style="margin-top:8px;font-size:10.5px;color:{t["muted"]}">'
+            f'<div class="upload-card-types" style="font-size:10.5px;color:{t["muted"]}">'
             f'XLSX (dataset) · PDF / DOCX (reference document) — mix and match freely</div>'
             f'</div>',
             unsafe_allow_html=True,
@@ -750,7 +753,7 @@ def page_upload() -> None:
             f'<div class="upload-card-sub">Downloaded from a previous audit\'s Results page. '
             f'Columns and rules it already covers are pre-filled automatically — only new ones '
             f'are sent to the AI. Leave empty for a fresh audit.</div>'
-            f'<div style="margin-top:8px;font-size:10.5px;color:{t["muted"]}">'
+            f'<div class="upload-card-types" style="font-size:10.5px;color:{t["muted"]}">'
             f'JSON only — must be a file this app generated</div>'
             f'</div>',
             unsafe_allow_html=True,
@@ -785,7 +788,7 @@ def page_upload() -> None:
             f'<div class="upload-card-sub">A completed, human-written audit report from before — '
             f'not a procedure. Its findings are read as extra rules and start at '
             f'<b>High confidence</b>, since a human already validated them in a real audit.</div>'
-            f'<div style="margin-top:8px;font-size:10.5px;color:{t["muted"]}">'
+            f'<div class="upload-card-types" style="font-size:10.5px;color:{t["muted"]}">'
             f'PDF · DOCX · TXT — not for scanned/image documents</div>'
             f'</div>',
             unsafe_allow_html=True,
@@ -896,6 +899,7 @@ def _run_pipeline_phase1(ds_name: str, ds_bytes: bytes) -> None:
                 manual_report_paths=manual_paths,
             )
         except Exception as e:
+            traceback.print_exc()
             status.empty()
             progress.empty()
             st.error(f"Pipeline failed on dataset '{ds_name}': {e}")
@@ -953,6 +957,7 @@ def _run_pipeline_phase2(phase1, col_map: dict) -> None:
             past_observations=st.session_state.past_observations_cache,
         )
     except Exception as e:
+        traceback.print_exc()
         status.empty()
         progress.empty()
         st.error(f"Rule filtering failed: {e}")
@@ -988,6 +993,7 @@ def _run_pipeline_phase3(phase1, col_map: dict, applicable_rules, dropped_rules:
             past_observations=st.session_state.past_observations_cache,
         )
     except Exception as e:
+        traceback.print_exc()
         status.empty()
         progress.empty()
         st.error(f"Rule check generation failed: {e}")
@@ -1023,6 +1029,7 @@ def _run_pipeline_phase4(phase1, col_map: dict, rule_checks, applicable_rules, d
             past_observations=st.session_state.past_observations_cache,
         )
     except Exception as e:
+        traceback.print_exc()
         status.empty()
         progress.empty()
         st.error(f"Pipeline failed: {e}")

@@ -85,8 +85,12 @@ def chat(messages: list[dict], *, json_mode: bool = False) -> str:
                 temperature=0,
                 response_format={"type": "json_object"},
             )
-        except Exception:
-            # Model doesn't support response_format — retry without it
+        except Exception as first_err:
+            # Model doesn't support response_format — retry without it. Print what the
+            # first attempt actually failed with (e.g. auth/connection error, not just
+            # "doesn't support response_format") so it's visible if the retry fails too.
+            print(f"  [llm client] first call failed ({type(first_err).__name__}: {first_err}) "
+                  f"— retrying without response_format")
             resp = client.chat.completions.create(
                 model=model,
                 messages=messages,
