@@ -196,7 +196,10 @@ def _judgment_verdict(jr: JudgmentResult, check: RuleCheck) -> RuleVerdict:
         idx = ev.get("row_index", -1)
         if not (0 <= idx < len(items)):
             continue
-        v      = (ev.get("verdict") or "indeterminate").strip().lower()
+        v      = ev.get("verdict") or "indeterminate"
+        if isinstance(v, list):
+            v = v[0] if v else "indeterminate"
+        v      = str(v).strip().lower()
         row    = items[idx]
         weight = item_weights[idx]
         is_head = idx < n_head_items

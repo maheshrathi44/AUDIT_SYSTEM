@@ -116,8 +116,8 @@ def _run_formula(row: dict, check: RuleCheck) -> str:
     if not _filter_applies(row, check):
         return "missing"
 
-    val_a = row.get(check.column_a, "").strip()
-    val_b = row.get(check.column_b, "").strip() if check.column_b else ""
+    val_a = str(row.get(check.column_a) or "").strip()
+    val_b = str(row.get(check.column_b) or "").strip() if check.column_b else ""
     comp  = check.computation
 
     if comp == "date_difference":
@@ -214,7 +214,7 @@ def traverse(
             sample = {
                 col: row.get(col, "")
                 for col in (ctx + check.sample_columns)
-                if row.get(col, "").strip()
+                if str(row.get(col) or "").strip()
             }
             if sample:
                 jr.samples.append(sample)
