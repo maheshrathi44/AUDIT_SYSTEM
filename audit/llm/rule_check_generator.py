@@ -54,8 +54,15 @@ DOCUMENT PRESENCE RULES ("form X must be attached", "certificate must be provide
 
 JUDGMENT (only when no formula is reliably possible):
   → check_type: "judgment"
-  → sample_columns: list the most relevant columns that contain evidence for this rule
+  → sample_columns: AT MOST 2 columns — the single most relevant column, plus a second
+    only if genuinely needed. Every extra column makes every row larger to evaluate,
+    so do not add a column "just in case" — pick the minimum that answers the question.
   → judgment_question: a precise yes/no question answerable from sample rows
+  → filter_column / filter_value (or filter_conditions for multiple, AND logic): set these
+    for a judgment check EXACTLY as you would for a conditional formula check, whenever the
+    rule only applies to some rows (a specific status, category, or condition). A row excluded
+    by the filter is never sent to judgment at all — always prefer a filter over asking the
+    judgment question to decide something a plain column value already tells you.
 
 === CRITICAL RULES ===
 1. column_a and column_b MUST be exact column names — copy character-for-character from the dataset.
@@ -64,6 +71,8 @@ JUDGMENT (only when no formula is reliably possible):
 3. threshold is an integer (days) for date_difference; null for everything else.
 4. Never use a text column for date_difference — column_a and column_b must both be date columns.
 5. If a rule requires checking two separate conditions, create the more important one.
+6. For judgment checks, always look for a filter first — only what's left after filtering
+   should ever need the judgment question.
 
 Return ONLY valid JSON — column names in the output must be real column names from the dataset:
 {
@@ -111,13 +120,15 @@ Return ONLY valid JSON — column names in the output must be real column names 
     {
       "rule_id": "R07",
       "check_type": "judgment",
-      "description": "requires reading free-text content to verify",
+      "description": "requires reading free-text content to verify, only for a specific status",
+      "filter_column": "<exact name of a status/category column, if the rule only applies to some rows>",
+      "filter_value": "<the value that must be present, e.g. \"Closed\">",
       "column_a": null,
       "column_b": null,
       "computation": null,
       "threshold": null,
       "pass_condition": null,
-      "sample_columns": ["<most relevant column>", "<second relevant column>"],
+      "sample_columns": ["<the one most relevant column — add a 2nd only if truly needed>"],
       "judgment_question": "<precise yes/no question based on the rule statement>"
     }
   ]
@@ -200,11 +211,18 @@ def generate_rule_checks(
             print(f"  WARN: batch {i // batch_size + 1} returned invalid JSON")
 
     print(f"    ({len(all_dicts)} rule checks generated)")
-    return [
+    checks = [
         dict_to_check(c, rule_index[c["rule_id"]])
         for c in all_dicts
         if c.get("rule_id") in rule_index
     ]
+    # Safety net for the prompt's "at most 2" instruction — the AI can still ignore
+    # it, so enforce it here regardless. Only applied to freshly-generated checks;
+    # a user's own manual choice on the Rule Check Review page is left alone.
+    for check in checks:
+        if check.check_type == "judgment" and len(check.sample_columns) > 2:
+            check.sample_columns = check.sample_columns[:2]
+    return checks
 
 
 def dict_to_check(c: dict, rule: DraftRule) -> RuleCheck:

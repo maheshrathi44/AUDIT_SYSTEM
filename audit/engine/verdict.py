@@ -7,12 +7,27 @@ Judgment rules: 1 LLM call per rule (small input — just samples).
 from __future__ import annotations
 
 import json
+import random
 from dataclasses import dataclass, field
 from typing import Callable
 
 from audit.engine.traversal import DetailedData, FormulaResult, JudgmentResult
 from audit.llm.client import chat
 from audit.llm.rule_check_generator import RuleCheck
+
+# A judgment rule's sample column(s) are often low-cardinality (Status, Reason,
+# Category, ...) — many rows share the exact same value. Rows with identical
+# sample-column values get the identical question asked of the identical text,
+# so (with temperature=0) they get the identical verdict. GROUP_CAP is how many
+# distinct value-combinations get judged individually and then applied back to
+# every row that shares them — this is deduplication, not sampling: it loses
+# nothing as long as a combination actually repeats.
+# Only once there are MORE distinct combinations than this does a real long tail
+# exist — TAIL_SAMPLE_CAP is the extra budget spent sampling that tail directly,
+# with the (much smaller) unsampled remainder estimated from that sample's own
+# pass/fail ratio. Both keep the LLM call's size bounded regardless of row count.
+GROUP_CAP       = 75
+TAIL_SAMPLE_CAP = 75
 
 _JUDGMENT_SYSTEM = """\
 You are an auditor. Given a rule and a list of data rows, classify EACH row individually.
@@ -113,10 +128,38 @@ def _judgment_verdict(jr: JudgmentResult, check: RuleCheck) -> RuleVerdict:
             finding=finding,
         )
 
-    # 0-based row indices so LLM row_index maps directly to jr.samples list
+    cols = check.sample_columns or []
+
+    # ── Group identical rows together — exact dedup, not sampling ───────────────
+    groups: dict[tuple, list[dict]] = {}
+    for row in jr.samples:
+        key = tuple(row.get(c, "") for c in cols)
+        groups.setdefault(key, []).append(row)
+
+    # Most-frequent combinations first, so the head cap covers as many real rows
+    # as possible exactly, before any estimation is needed at all.
+    ordered = sorted(groups.values(), key=len, reverse=True)
+    head = ordered[:GROUP_CAP]
+    tail_rows_flat = [row for rows in ordered[GROUP_CAP:] for row in rows]
+
+    # Items actually sent to the LLM: one representative row per head group (its
+    # verdict applies to every row that shares that group), plus — only if a long
+    # tail exists — a random sample of individual tail rows judged on their own.
+    items:         list[dict] = [rows[0] for rows in head]
+    item_weights:  list[int]  = [len(rows) for rows in head]
+    n_head_items = len(items)
+
+    tail_sample: list[dict] = []
+    if tail_rows_flat:
+        random.shuffle(tail_rows_flat)
+        tail_sample = tail_rows_flat[:TAIL_SAMPLE_CAP]
+        items.extend(tail_sample)
+        item_weights.extend([1] * len(tail_sample))
+    remaining_tail_rows = tail_rows_flat[len(tail_sample):]
+
     rows_text = "\n".join(
-        f"Row {i}: " + " | ".join(f"{k}: {v}" for k, v in s.items())
-        for i, s in enumerate(jr.samples)
+        f"Row {i}: " + " | ".join(f"{k}: {v}" for k, v in item.items())
+        for i, item in enumerate(items)
     )
 
     response = chat(
@@ -125,7 +168,7 @@ def _judgment_verdict(jr: JudgmentResult, check: RuleCheck) -> RuleVerdict:
             {"role": "user", "content": (
                 f"Rule: {check.rule.statement}\n"
                 f"Question: {check.judgment_question}\n\n"
-                f"Evaluate each of these {len(jr.samples):,} rows "
+                f"Evaluate each of these {len(items):,} rows "
                 f"({jr.missing:,} rows excluded by filter):\n\n"
                 f"{rows_text}"
             )},
@@ -141,32 +184,64 @@ def _judgment_verdict(jr: JudgmentResult, check: RuleCheck) -> RuleVerdict:
     except (json.JSONDecodeError, ValueError):
         evaluations, finding, risk = [], "Evaluation failed.", "Medium"
 
-    # Map per-row verdicts back to actual row dicts
-    pass_rows:  list[dict] = []
-    fail_rows:  list[dict] = []
-    indet_rows: list[dict] = []
+    # head_* counts are exact (each already scaled by how many real rows share that
+    # group). tail_sample_* counts are exact for the tail rows actually judged.
+    head_pass = head_fail = head_indet = 0
+    tail_sample_pass = tail_sample_fail = tail_sample_indet = 0
+    fail_examples: list[dict] = []
+    pass_examples: list[dict] = []
+    indet_examples: list[dict] = []
+
     for ev in evaluations:
         idx = ev.get("row_index", -1)
-        if 0 <= idx < len(jr.samples):
-            v = (ev.get("verdict") or "indeterminate").strip().lower()
-            if v == "pass":
-                pass_rows.append(jr.samples[idx])
-            elif v == "fail":
-                fail_rows.append(jr.samples[idx])
-            else:
-                indet_rows.append(jr.samples[idx])
+        if not (0 <= idx < len(items)):
+            continue
+        v      = (ev.get("verdict") or "indeterminate").strip().lower()
+        row    = items[idx]
+        weight = item_weights[idx]
+        is_head = idx < n_head_items
 
-    pass_count = len(pass_rows)
-    fail_count = len(fail_rows)
-    evaluated  = pass_count + fail_count
-    pct        = round(100 * pass_count / evaluated, 1) if evaluated else 0.0
+        if v == "pass":
+            head_pass += weight if is_head else 0
+            tail_sample_pass += 0 if is_head else 1
+            if len(pass_examples) < 3: pass_examples.append(row)
+        elif v == "fail":
+            head_fail += weight if is_head else 0
+            tail_sample_fail += 0 if is_head else 1
+            if len(fail_examples) < 5: fail_examples.append(row)
+        else:
+            head_indet += weight if is_head else 0
+            tail_sample_indet += 0 if is_head else 1
+            if len(indet_examples) < 3: indet_examples.append(row)
+
+    # Extrapolate the unsampled remainder of the tail from the tail sample's own
+    # pass/fail/indeterminate split — proportional to real judged evidence, not a
+    # guess. If the tail sample itself produced nothing usable, the remainder is
+    # counted as indeterminate (missing) rather than assumed either way.
+    extra_pass = extra_fail = extra_indet = 0
+    n_remaining = len(remaining_tail_rows)
+    if n_remaining:
+        tail_judged = tail_sample_pass + tail_sample_fail + tail_sample_indet
+        if tail_judged:
+            extra_pass  = round(n_remaining * tail_sample_pass / tail_judged)
+            extra_fail  = round(n_remaining * tail_sample_fail / tail_judged)
+            extra_indet = n_remaining - extra_pass - extra_fail
+        else:
+            extra_indet = n_remaining
+
+    pass_count = head_pass + tail_sample_pass + extra_pass
+    fail_count = head_fail + tail_sample_fail + extra_fail
+    indet_count = head_indet + tail_sample_indet + extra_indet
+
+    evaluated = pass_count + fail_count
+    pct       = round(100 * pass_count / evaluated, 1) if evaluated else 0.0
 
     if pct >= 90:   verdict_str = "Pass"
     elif pct >= 50: verdict_str = "Partial"
     else:           verdict_str = "Fail"
 
-    # missing = filter-excluded rows + rows LLM couldn't evaluate
-    total_missing = jr.missing + len(indet_rows)
+    # missing = filter-excluded rows + rows LLM couldn't (or didn't) evaluate
+    total_missing = jr.missing + indet_count
 
     return RuleVerdict(
         rule_id=check.rule_id, rule_statement=check.rule.statement,
@@ -175,10 +250,10 @@ def _judgment_verdict(jr: JudgmentResult, check: RuleCheck) -> RuleVerdict:
         pass_count=pass_count, fail_count=fail_count,
         missing_count=total_missing,
         finding=finding,
-        fail_examples=fail_rows[:5],
-        pass_examples=pass_rows[:5],
-        miss_examples=indet_rows[:5],
-        samples=jr.samples,   # all applicable rows for "view all" expander
+        fail_examples=fail_examples,
+        pass_examples=pass_examples,
+        miss_examples=indet_examples,
+        samples=jr.samples,   # all applicable rows, ungrouped — for "view all" expander
     )
 
 
