@@ -151,7 +151,9 @@ def _inject_css() -> None:
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     font-size: 14px;
 }}
-.block-container {{ padding-top: 1.6rem; padding-bottom: 2.5rem; max-width: 100%; padding-left: 3rem; padding-right: 3rem; }}
+.block-container {{ padding-top: 1.6rem; padding-bottom: 2.5rem; max-width: 100%; padding-left: 3rem; padding-right: 3rem; min-height: calc(100vh - 80px); }}
+section[data-testid="stSidebar"] {{ display: none; }}
+.stApp {{ min-height: 100vh; }}
 
 /* Force text colour in Streamlit markdown/text containers */
 .stMarkdown p, .stMarkdown li, .stMarkdown span,
