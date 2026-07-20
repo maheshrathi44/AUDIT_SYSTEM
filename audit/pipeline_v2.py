@@ -22,6 +22,7 @@ Three-phase design (user reviews between phases):
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -204,6 +205,58 @@ def run_pipeline_phase1(
     )
 
 
+_STOP_WORDS = {
+    "must", "be", "the", "a", "an", "of", "in", "is", "to", "for", "if",
+    "and", "or", "not", "are", "that", "this", "with", "has", "have",
+    "it", "its", "by", "on", "at", "was", "were", "been", "all", "any",
+}
+
+
+def _rule_similarity(a: str, b: str) -> float:
+    """Jaccard similarity of significant words between two rule statements."""
+    def words(s):
+        return set(re.sub(r"[^\w\s]", "", s.lower()).split()) - _STOP_WORDS
+    wa, wb = words(a), words(b)
+    if not wa or not wb:
+        return 0.0
+    return len(wa & wb) / len(wa | wb)
+
+
+def _dedup_procedure_vs_manual(
+    applicable_rules: list[DraftRule],
+    threshold: float = 0.35,
+) -> tuple[list[DraftRule], dict[str, str]]:
+    """
+    If a procedure rule is semantically similar to a past-audit rule,
+    drop the procedure rule (the human-validated version wins).
+    Returns (filtered_applicable, extra_dropped).
+    """
+    manual_rules = [r for r in applicable_rules if r.is_manual]
+    if not manual_rules:
+        return applicable_rules, {}
+
+    extra_dropped: dict[str, str] = {}
+    filtered: list[DraftRule] = []
+    for rule in applicable_rules:
+        if rule.is_manual:
+            filtered.append(rule)
+            continue
+        best_match: DraftRule | None = None
+        best_sim = 0.0
+        for mr in manual_rules:
+            sim = _rule_similarity(rule.statement, mr.statement)
+            if sim > best_sim:
+                best_sim, best_match = sim, mr
+        if best_sim >= threshold and best_match:
+            extra_dropped[rule.rule_id] = (
+                f"Covered by past audit report rule {best_match.rule_id} "
+                f'("{best_match.statement}")'
+            )
+        else:
+            filtered.append(rule)
+    return filtered, extra_dropped
+
+
 def run_pipeline_phase2(
     phase1:            PipelinePhase1Result,
     col_map:            dict,
@@ -233,6 +286,12 @@ def run_pipeline_phase2(
                 f"{len(remaining_rules)} sent to AI for filtering")
     else:
         applicable_rules, dropped = filter_rules(phase1.all_rules, col_map)
+
+    # Drop procedure rules that duplicate a past-audit-report rule (human wins)
+    applicable_rules, extra_dropped = _dedup_procedure_vs_manual(applicable_rules)
+    if extra_dropped:
+        dropped.update(extra_dropped)
+        log(f"  {len(extra_dropped)} procedure rule(s) auto-dropped — covered by past audit report")
 
     log(f"  {len(applicable_rules)} applicable, {len(dropped)} dropped — review before proceeding")
     return PipelinePhase2Result(
@@ -324,9 +383,21 @@ def run_pipeline_phase3(
         elif check.check_type == "judgment":
             valid_samples = [c for c in check.sample_columns if c in audit_set]
             if not valid_samples:
-                dropped_rules[check.rule_id] = "no audit-relevant sample columns found in dataset"
-                continue
-            check.sample_columns = valid_samples
+                # Fallback: pick up to 2 audit-relevant text/description columns
+                fallback = [
+                    h for h in headers
+                    if h in audit_set
+                    and audit_col_map.get(h, {}).get("data_type") in ("text",)
+                    and audit_col_map.get(h, {}).get("semantic_role") in (
+                        "description", "status", "category", "reason", "other"
+                    )
+                ][:2]
+                if not fallback:
+                    dropped_rules[check.rule_id] = "no audit-relevant sample columns found in dataset"
+                    continue
+                check.sample_columns = fallback
+            else:
+                check.sample_columns = valid_samples
         valid_checks.append(check)
 
     valid_ids        = {c.rule_id for c in valid_checks}
