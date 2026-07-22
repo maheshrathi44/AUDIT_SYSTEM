@@ -31,7 +31,22 @@ load_dotenv()
 OCR_THRESHOLD = 100
 
 
-def _read_pdf(file_path: Path) -> tuple[str, list[str], str]:
+def _parse_pages(pages_str: str) -> list[int]:
+    """Parse a page string like '1, 3, 5-7' into a sorted list of 0-indexed page numbers."""
+    result: set[int] = set()
+    for part in pages_str.replace(" ", "").split(","):
+        if not part:
+            continue
+        if "-" in part:
+            a, _, b = part.partition("-")
+            if a.isdigit() and b.isdigit():
+                result.update(range(int(a) - 1, int(b)))  # 1-indexed → 0-indexed
+        elif part.isdigit():
+            result.add(int(part) - 1)
+    return sorted(result)
+
+
+def _read_pdf(file_path: Path, pages: list[int] | None = None) -> tuple[str, list[str], str]:
     warnings: list[str] = []
 
     try:
@@ -44,10 +59,12 @@ def _read_pdf(file_path: Path) -> tuple[str, list[str], str]:
         )
 
     document = fitz.open(file_path)
+    total = len(document)
+    page_indices = [i for i in (pages or range(total)) if 0 <= i < total]
 
     text = "\n".join(
-        page.get_text("text")
-        for page in document
+        document[i].get_text("text")
+        for i in page_indices
     ).strip()
 
     if len(text) >= OCR_THRESHOLD:
@@ -63,38 +80,22 @@ def _read_pdf(file_path: Path) -> tuple[str, list[str], str]:
 
         poppler_path = os.getenv("POPPLER_PATH")
 
-        images = convert_from_path(
-            str(file_path),
-            poppler_path=poppler_path
-        )
+        all_images = convert_from_path(str(file_path), poppler_path=poppler_path)
+        selected_images = [all_images[i] for i in page_indices if i < len(all_images)]
 
-        ocr_text = []
+        text = "\n".join(
+            pytesseract.image_to_string(img) for img in selected_images
+        ).strip()
 
-        for image in images:
-            ocr_text.append(
-                pytesseract.image_to_string(image)
-            )
-
-        text = "\n".join(ocr_text).strip()
-
-        warnings.append(
-            "Scanned PDF detected. OCR used."
-        )
-
+        warnings.append("Scanned PDF detected. OCR used.")
         return text, warnings, "ocr"
 
     except ImportError:
-        warnings.append(
-            "OCR dependencies missing. Install pdf2image and pytesseract."
-        )
-
+        warnings.append("OCR dependencies missing. Install pdf2image and pytesseract.")
         return text, warnings, "pdf_text"
 
     except Exception as e:
-        warnings.append(
-            f"OCR failed: {e}"
-        )
-
+        warnings.append(f"OCR failed: {e}")
         return text, warnings, "pdf_text"
 
 
@@ -140,7 +141,7 @@ def _read_text(file_path: Path) -> tuple[str, list[str]]:
     ]
 
 
-def read_procedure_file(file_path: str) -> ProcedureDocument:
+def read_procedure_file(file_path: str, pages: list[int] | None = None) -> ProcedureDocument:
     path = Path(file_path)
 
     suffix = path.suffix.lower()
@@ -148,7 +149,7 @@ def read_procedure_file(file_path: str) -> ProcedureDocument:
     source = "pdf_text"
 
     if suffix == ".pdf":
-        text, warnings, source = _read_pdf(path)
+        text, warnings, source = _read_pdf(path, pages=pages)
 
     elif suffix == ".docx":
         text, warnings = _read_docx(path)

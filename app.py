@@ -92,6 +92,8 @@ for k, v in [
     ("past_observations_cache", None),
     # Past Audit Report(s) uploaded on page 1 — raw bytes, findings extracted per dataset run
     ("manual_report_files_cache", None),
+    # Page selection for past audit report PDFs — {filename: [0-indexed page list]}
+    ("manual_report_pages_cache", None),
 ]:
     if k not in st.session_state:
         st.session_state[k] = v
@@ -113,6 +115,7 @@ def _reset_multi_dataset_state() -> None:
     st.session_state.dataset_reuse_notes       = None
     st.session_state.past_observations_cache   = None
     st.session_state.manual_report_files_cache = None
+    st.session_state.manual_report_pages_cache = None
     st.session_state.rule_votes                = {}
 
 
@@ -814,6 +817,23 @@ def page_upload() -> None:
                 f'{name_pills}</div>',
                 unsafe_allow_html=True,
             )
+            has_pdf = any(f.name.lower().endswith(".pdf") for f in manual_report_files)
+            if has_pdf:
+                manual_report_pages_str = st.text_input(
+                    "manual_report_pages",
+                    placeholder="e.g. 1, 3, 5-7  — leave blank to use all pages",
+                    label_visibility="collapsed",
+                    help="Select which pages to extract rules from (PDF only). Leave blank for all pages.",
+                )
+                st.markdown(
+                    f'<div style="font-size:10.5px;color:{t["muted"]};margin-top:2px">'
+                    f'📄 Pages to extract rules from — e.g. <b>1, 3, 5-7</b>. Leave blank for all pages.</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                manual_report_pages_str = ""
+        else:
+            manual_report_pages_str = ""
 
     st.markdown("<br>", unsafe_allow_html=True)
     ready = bool(proc_files and dataset_files)
@@ -829,17 +849,20 @@ def page_upload() -> None:
         doc_names = [f.name for f in supp_files] if supp_files else []
         _start_multi_dataset_run(
             proc_files, dataset_files, doc_names, past_observations, manual_report_files,
+            manual_report_pages_str=manual_report_pages_str,
         )
 
 
 def _start_multi_dataset_run(
     proc_files, dataset_files, doc_names=None, past_observations=None, manual_report_files=None,
+    manual_report_pages_str: str = "",
 ) -> None:
     """
     Seeds the multi-dataset queue and kicks off phase1 for the first dataset.
     Procedure files + doc names are cached as raw bytes so they survive reruns
     while the remaining datasets in the queue are processed one by one.
     """
+    from audit.extractors.procedure_reader import _parse_pages
     st.session_state.proc_files_cache          = [(f.name, f.getvalue()) for f in proc_files]
     st.session_state.doc_names_cache           = doc_names or []
     st.session_state.manual_report_files_cache = [(f.name, f.getvalue()) for f in (manual_report_files or [])]
@@ -847,6 +870,13 @@ def _start_multi_dataset_run(
     st.session_state.schema_cache              = {}
     st.session_state.dataset_reuse_notes       = {}
     st.session_state.past_observations_cache   = past_observations
+    # Parse page string once and apply to all uploaded PDF reports
+    parsed_pages = _parse_pages(manual_report_pages_str) if manual_report_pages_str.strip() else None
+    st.session_state.manual_report_pages_cache = {
+        f.name: parsed_pages
+        for f in (manual_report_files or [])
+        if f.name.lower().endswith(".pdf") and parsed_pages
+    }
     queue = [(f.name, f.getvalue()) for f in dataset_files]
     first_name, first_bytes = queue.pop(0)
     st.session_state.dataset_queue = queue
@@ -899,6 +929,7 @@ def _run_pipeline_phase1(ds_name: str, ds_bytes: bytes) -> None:
                 on_progress=log,
                 past_observations=st.session_state.past_observations_cache,
                 manual_report_paths=manual_paths,
+                manual_report_pages=st.session_state.manual_report_pages_cache or {},
             )
         except Exception as e:
             traceback.print_exc()

@@ -109,12 +109,13 @@ def _find_case_col(headers: list[str], col_map: dict) -> str | None:
 
 
 def run_pipeline_phase1(
-    procedure_paths:     list[str],
-    dataset_path:        str,
+    procedure_paths:          list[str],
+    dataset_path:             str,
     supported_doc_names=None,
-    on_progress:         Callable[[str], None] | None = None,
-    past_observations:   dict | None = None,
-    manual_report_paths: list[str] | None = None,
+    on_progress:              Callable[[str], None] | None = None,
+    past_observations:        dict | None = None,
+    manual_report_paths:      list[str] | None = None,
+    manual_report_pages:      dict[str, list[int]] | None = None,
 ) -> PipelinePhase1Result:
     """
     Steps 1-2 only. Returns phase1 result for user review of column meanings.
@@ -123,6 +124,8 @@ def run_pipeline_phase1(
     manual_report_paths: optional past human-written audit report(s) (PDF/DOCX/TXT) —
     findings extracted from these flow into the same rule review/rule-check pipeline
     as procedure rules, tagged is_manual=True (seeds them at High confidence).
+    manual_report_pages: {filename: [0-indexed page numbers]} — limits extraction to
+    selected pages only. Omit or pass None to use all pages.
     """
     warnings: list[str] = []
     supported_doc_names = supported_doc_names or []
@@ -147,10 +150,13 @@ def run_pipeline_phase1(
         log(f"  {len(rules)} rules from {path.name}")
         all_rules.extend(rules)
 
+    _manual_pages = manual_report_pages or {}
     for path_str in manual_report_paths:
         path = Path(path_str)
-        log(f"  Reading past audit report: {path.name}")
-        doc = read_procedure_file(path_str)
+        pages = _manual_pages.get(path.name)
+        page_note = f" (pages {', '.join(str(p+1) for p in pages)})" if pages else ""
+        log(f"  Reading past audit report: {path.name}{page_note}")
+        doc = read_procedure_file(path_str, pages=pages)
         for w in doc.warnings:
             warnings.append(w)
         rules  = extract_manual_findings_llm(doc.text, source_name=path.name, procedure_id=path.stem)
